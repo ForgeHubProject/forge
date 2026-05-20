@@ -216,9 +216,9 @@ A glTF handler in the CLI produces a `StructuredDiff`. ForgeHub's `GltfDiffViewe
 ## Milestones
 
 ### M0 — Spec (now)
-- [ ] Finalize `ForgeHandler` interface
-- [ ] Decide implementation language (Go + git2go recommended)
-- [ ] Define `StructuredDiff` wire format (JSON schema)
+- [x] Finalize `ForgeHandler` interface
+- [x] Decide implementation language (Go + git2go)
+- [x] Define `StructuredDiff` wire format ([JSON schema](docs/structured-diff-schema.json) · [spec](docs/structured-diff.md))
 
 ### M1 — Core + TextHandler
 - [ ] Forge CLI skeleton (`forge diff`, `forge merge`, `forge log`, `forge push`, `forge pull`)
