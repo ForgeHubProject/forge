@@ -60,9 +60,25 @@ func (h *Handler) Diff(base, head handler.Blob) (handler.StructuredDiff, error) 
 	}, nil
 }
 
-// Merge is not implemented for text — Forge falls back to git's line merge.
-func (h *Handler) Merge(_, _, _ handler.Blob) (handler.Blob, *handler.ConflictInfo, error) {
-	return nil, nil, handler.ErrNotSupported
+// Merge performs a 3-way line merge matching git's behaviour:
+// non-overlapping changes from both sides are applied automatically;
+// overlapping changes produce git-style conflict markers in the output
+// and are reported in ConflictInfo.
+func (h *Handler) Merge(base, ours, theirs handler.Blob) (handler.Blob, *handler.ConflictInfo, error) {
+	baseLines := toLines(string(base))
+	oursLines := toLines(string(ours))
+	theirsLines := toLines(string(theirs))
+
+	ourHunks := computeHunks(baseLines, oursLines)
+	theirHunks := computeHunks(baseLines, theirsLines)
+
+	merged, conflicts := merge3(baseLines, ourHunks, theirHunks, "ours", "theirs")
+
+	result := handler.Blob(strings.Join(merged, ""))
+	if len(conflicts) == 0 {
+		return result, nil, nil
+	}
+	return result, &handler.ConflictInfo{Conflicts: conflicts}, nil
 }
 
 func splitLines(s string) []string {
