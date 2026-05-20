@@ -2,12 +2,15 @@ package main
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	gogit "github.com/go-git/go-git/v5"
+	gogithttp "github.com/go-git/go-git/v5/plumbing/transport/http"
+	gogitssh "github.com/go-git/go-git/v5/plumbing/transport/ssh"
 	"github.com/spf13/cobra"
 	"github.com/yakupatahanov/forge/internal/gitrepo"
 	"github.com/yakupatahanov/forge/internal/handler"
@@ -50,35 +53,106 @@ func defaultRegistry() *handler.Registry {
 // ── forge clone ───────────────────────────────────────────────────────────────
 
 func cloneCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "clone <url> [directory]",
 		Short: "Clone a Forge repository and report required handlers",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE:  runClone,
 	}
+	cmd.Flags().String("token", "", "Personal access token for HTTPS authentication")
+	cmd.Flags().String("ssh-key", defaultSSHKey(), "Path to SSH private key")
+	cmd.Flags().String("ssh-password", "", "Passphrase for the SSH private key (if encrypted)")
+	return cmd
 }
 
-func runClone(_ *cobra.Command, args []string) error {
-	url := args[0]
+func runClone(cmd *cobra.Command, args []string) error {
+	rawURL := args[0]
 	dir := ""
 	if len(args) == 2 {
 		dir = args[1]
 	} else {
-		dir = repoNameFromURL(url)
+		dir = repoNameFromURL(rawURL)
 	}
+
+	token, _ := cmd.Flags().GetString("token")
+	sshKey, _ := cmd.Flags().GetString("ssh-key")
+	sshPassword, _ := cmd.Flags().GetString("ssh-password")
+
+	cloneOpts, err := buildCloneOptions(rawURL, token, sshKey, sshPassword)
+	if err != nil {
+		return err
+	}
+	cloneOpts.Progress = os.Stdout
 
 	fmt.Printf("Cloning into '%s'...\n", dir)
 
-	_, err := gogit.PlainClone(dir, false, &gogit.CloneOptions{
-		URL:      url,
-		Progress: os.Stdout,
-	})
+	_, err = gogit.PlainClone(dir, false, cloneOpts)
 	if err != nil {
 		return fmt.Errorf("clone failed: %w", err)
 	}
 
 	reportMissingHandlers(dir)
 	return nil
+}
+
+// buildCloneOptions constructs CloneOptions with the appropriate auth method.
+// For SSH URLs it loads the key file; for HTTPS it uses a token if provided.
+// Public repos need no auth.
+func buildCloneOptions(rawURL, token, sshKeyPath, sshPassword string) (*gogit.CloneOptions, error) {
+	opts := &gogit.CloneOptions{URL: rawURL}
+
+	if isSSHURL(rawURL) {
+		keys, err := gogitssh.NewPublicKeysFromFile("git", sshKeyPath, sshPassword)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"could not load SSH key %s: %w\n"+
+					"  Use --ssh-key to specify a different key, or\n"+
+					"  clone over HTTPS with a token: forge clone <https-url> --token <token>",
+				sshKeyPath, err,
+			)
+		}
+		opts.Auth = keys
+		return opts, nil
+	}
+
+	// HTTPS: prefer explicit flag, then env vars.
+	if token == "" {
+		for _, env := range []string{"FORGE_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} {
+			if t := os.Getenv(env); t != "" {
+				token = t
+				break
+			}
+		}
+	}
+	if token != "" {
+		opts.Auth = &gogithttp.BasicAuth{Username: "x-token", Password: token}
+	}
+
+	return opts, nil
+}
+
+func isSSHURL(rawURL string) bool {
+	// SCP-style: git@github.com:user/repo.git
+	if strings.HasPrefix(rawURL, "git@") {
+		return true
+	}
+	u, err := url.Parse(rawURL)
+	return err == nil && u.Scheme == "ssh"
+}
+
+// defaultSSHKey returns ~/.ssh/id_ed25519 if it exists, else ~/.ssh/id_rsa.
+func defaultSSHKey() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	for _, name := range []string{"id_ed25519", "id_rsa", "id_ecdsa"} {
+		p := filepath.Join(home, ".ssh", name)
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return filepath.Join(home, ".ssh", "id_ed25519")
 }
 
 // reportMissingHandlers reads .forge/handlers and lists any requirements that
