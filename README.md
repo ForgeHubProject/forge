@@ -221,10 +221,10 @@ A glTF handler in the CLI produces a `StructuredDiff`. ForgeHub's `GltfDiffViewe
 - [x] Define `StructuredDiff` wire format ([JSON schema](docs/structured-diff-schema.json) · [spec](docs/structured-diff.md))
 
 ### M1 — Core + TextHandler
-- [ ] Forge CLI skeleton (`forge diff`, `forge merge`, `forge log`, `forge push`, `forge pull`)
-- [ ] libgit2 integration via language binding
-- [ ] `TextHandler` — wraps libgit2's built-in line diff (establishes baseline, no regression vs git)
-- [ ] Handler registry with path-pattern matching
+- [x] Forge CLI skeleton (`forge diff`, `forge merge`, `forge log`, `forge push`, `forge pull`)
+- [x] Git integration via go-git (pure Go; git2go deferred until libgit2 1.7.x release is published)
+- [x] `TextHandler` — line-level diff, establishes baseline parity with git
+- [x] Handler registry with first-match resolution
 
 ### M2 — First non-text handler (GltfHandler)
 - [ ] Parse glTF/GLB scene graph into semantic representation
