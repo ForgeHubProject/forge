@@ -1,0 +1,77 @@
+package text
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/sergi/go-diff/diffmatchpatch"
+	"github.com/yakupatahanov/forge/internal/handler"
+)
+
+// Handler handles any plain-text file. Registered last as the catch-all fallback.
+type Handler struct{}
+
+func New() *Handler { return &Handler{} }
+
+// Match returns true for all paths — text is the fallback handler.
+func (h *Handler) Match(_ string) bool { return true }
+
+func (h *Handler) Diff(base, head handler.Blob) (handler.StructuredDiff, error) {
+	dmp := diffmatchpatch.New()
+	baseChars, headChars, lines := dmp.DiffLinesToChars(string(base), string(head))
+	diffs := dmp.DiffMain(baseChars, headChars, false)
+	diffs = dmp.DiffCharsToLines(diffs, lines)
+
+	var changes []handler.DiffChange
+	baseLine, headLine := 1, 1
+
+	for _, d := range diffs {
+		ls := splitLines(d.Text)
+		switch d.Type {
+		case diffmatchpatch.DiffDelete:
+			for _, line := range ls {
+				changes = append(changes, handler.DiffChange{
+					Path:   fmt.Sprintf("line:%d", baseLine),
+					Kind:   handler.Removed,
+					Before: line,
+				})
+				baseLine++
+			}
+		case diffmatchpatch.DiffInsert:
+			for _, line := range ls {
+				changes = append(changes, handler.DiffChange{
+					Path:  fmt.Sprintf("line:%d", headLine),
+					Kind:  handler.Added,
+					After: line,
+				})
+				headLine++
+			}
+		case diffmatchpatch.DiffEqual:
+			n := len(ls)
+			baseLine += n
+			headLine += n
+		}
+	}
+
+	return handler.StructuredDiff{
+		Version: "1.0",
+		Format:  "text",
+		Changes: changes,
+	}, nil
+}
+
+// Merge is not implemented for text — Forge falls back to git's line merge.
+func (h *Handler) Merge(_, _, _ handler.Blob) (handler.Blob, *handler.ConflictInfo, error) {
+	return nil, nil, handler.ErrNotSupported
+}
+
+func splitLines(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, "\n")
+	if len(parts) > 0 && parts[len(parts)-1] == "" {
+		parts = parts[:len(parts)-1]
+	}
+	return parts
+}
