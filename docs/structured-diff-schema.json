@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forgehub.io/schemas/structured-diff/v1.json",
+  "title": "StructuredDiff",
+  "description": "Semantic diff produced by a ForgeHandler. Output of ForgeHandler.Diff(); consumed by Forge CLI renderers and ForgeHub web viewers.",
+  "type": "object",
+  "required": ["version", "format", "changes"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Schema version. Minor bumps are backwards-compatible additions. Major bumps are breaking.",
+      "pattern": "^\\d+\\.\\d+$",
+      "examples": ["1.0"]
+    },
+    "format": {
+      "type": "string",
+      "description": "Handler format identifier. Lowercase, no dots. Used by viewers to select a renderer.",
+      "examples": ["gltf", "obj", "psd", "text", "json"]
+    },
+    "changes": {
+      "type": "array",
+      "description": "Top-level list of semantic changes. May be nested via 'children'.",
+      "items": { "$ref": "#/$defs/DiffChange" }
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Optional handler-defined extras at the diff level (e.g. thumbnails, stats, preview frames).",
+      "additionalProperties": true
+    }
+  },
+
+  "$defs": {
+    "DiffChange": {
+      "type": "object",
+      "required": ["path", "kind"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Semantic address of the changed unit within the file's domain model. Format is handler-defined but should be human-readable.",
+          "examples": [
+            "nodes[2].translation",
+            "meshes[\"Torso\"].primitives[0].material",
+            "layers[\"Background\"].opacity",
+            "line:42",
+            "dependencies.lodash"
+          ]
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["added", "removed", "modified"],
+          "description": "'added': unit exists in head but not base. 'removed': exists in base but not head. 'modified': exists in both but changed."
+        },
+        "label": {
+          "type": "string",
+          "description": "Optional human-readable display name for this change. Falls back to 'path' if absent.",
+          "examples": ["Torso mesh material", "Background layer opacity", "lodash dependency"]
+        },
+        "before": {
+          "description": "Value before the change. Required when kind is 'removed' or 'modified'. Absent or null for 'added'.",
+          "$ref": "#/$defs/DiffValue"
+        },
+        "after": {
+          "description": "Value after the change. Required when kind is 'added' or 'modified'. Absent or null for 'removed'.",
+          "$ref": "#/$defs/DiffValue"
+        },
+        "children": {
+          "type": "array",
+          "description": "Nested changes within this semantic unit. Used when a compound object changed and its sub-fields should be listed separately.",
+          "items": { "$ref": "#/$defs/DiffChange" }
+        },
+        "metadata": {
+          "type": "object",
+          "description": "Optional handler-defined extras at the change level (e.g. a per-node thumbnail, a line range, a bounding box).",
+          "additionalProperties": true
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "added"    } }, "required": ["kind"] },
+          "then": { "required": ["after"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "removed"  } }, "required": ["kind"] },
+          "then": { "required": ["before"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "modified" } }, "required": ["kind"] },
+          "then": { "required": ["before", "after"] }
+        }
+      ]
+    },
+
+    "DiffValue": {
+      "description": "Any JSON-representable value. For binary data (thumbnails, preview images, audio snippets) use the binary envelope object described below.",
+      "oneOf": [
+        {
+          "title": "Scalar or structured value",
+          "not": {
+            "type": "object",
+            "required": ["$type"],
+            "properties": { "$type": { "const": "binary" } }
+          }
+        },
+        {
+          "title": "Binary envelope",
+          "description": "Used when the value cannot be represented as JSON (e.g. a PNG thumbnail, a PCM audio snippet). Base64-encoded.",
+          "type": "object",
+          "required": ["$type", "encoding", "data"],
+          "additionalProperties": false,
+          "properties": {
+            "$type":    { "type": "string", "const": "binary" },
+            "encoding": { "type": "string", "const": "base64" },
+            "data":     { "type": "string", "description": "Base64-encoded bytes." },
+            "mimeType": { "type": "string", "description": "MIME type of the decoded bytes.", "examples": ["image/png", "image/webp", "audio/wav"] }
+          }
+        }
+      ]
+    }
+  }
+}
