@@ -27,6 +27,7 @@ func rootCmd() *cobra.Command {
 	root.AddCommand(
 		diffCmd(),
 		mergeCmd(),
+		mergeFileCmd(),
 		logCmd(),
 		pushCmd(),
 		pullCmd(),
@@ -153,6 +154,65 @@ func mergeCmd() *cobra.Command {
 			return fmt.Errorf("forge merge is not yet implemented (planned for M3)")
 		},
 	}
+}
+
+// ── forge merge-file ──────────────────────────────────────────────────────────
+
+func mergeFileCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "merge-file <base> <ours> <theirs>",
+		Short: "3-way merge three files using the format handler (like git merge-file)",
+		Long: `Performs a 3-way merge of BASE, OURS, and THEIRS using the appropriate
+format handler. The result is written back to OURS, matching git merge-file behaviour.
+
+Exits 0 on a clean merge, 1 if there are conflicts (conflict markers are
+written into OURS so you can inspect and resolve them).`,
+		Args: cobra.ExactArgs(3),
+		RunE: runMergeFile,
+	}
+}
+
+func runMergeFile(_ *cobra.Command, args []string) error {
+	basePath, oursPath, theirsPath := args[0], args[1], args[2]
+
+	base, err := os.ReadFile(basePath)
+	if err != nil {
+		return fmt.Errorf("reading base %s: %w", basePath, err)
+	}
+	ours, err := os.ReadFile(oursPath)
+	if err != nil {
+		return fmt.Errorf("reading ours %s: %w", oursPath, err)
+	}
+	theirs, err := os.ReadFile(theirsPath)
+	if err != nil {
+		return fmt.Errorf("reading theirs %s: %w", theirsPath, err)
+	}
+
+	reg := defaultRegistry()
+	h, err := reg.Resolve(oursPath)
+	if err != nil {
+		return err
+	}
+
+	merged, ci, err := h.Merge(base, ours, theirs)
+	if err != nil {
+		return fmt.Errorf("merge failed: %w", err)
+	}
+
+	if err := os.WriteFile(oursPath, merged, 0644); err != nil {
+		return fmt.Errorf("writing result to %s: %w", oursPath, err)
+	}
+
+	if ci != nil && len(ci.Conflicts) > 0 {
+		fmt.Fprintf(os.Stderr, "CONFLICT: %d conflict(s) in %s\n", len(ci.Conflicts), oursPath)
+		for _, c := range ci.Conflicts {
+			fmt.Fprintf(os.Stderr, "  %s\n", c.Path)
+		}
+		os.Exit(1)
+	}
+
+	fmt.Printf("Merged cleanly into %s\n", oursPath)
+	return nil
 }
 
 // ── forge log ─────────────────────────────────────────────────────────────────
