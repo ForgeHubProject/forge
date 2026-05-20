@@ -4,12 +4,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
+	gogit "github.com/go-git/go-git/v5"
 	"github.com/spf13/cobra"
 	"github.com/yakupatahanov/forge/internal/gitrepo"
 	"github.com/yakupatahanov/forge/internal/handler"
 	"github.com/yakupatahanov/forge/internal/handler/text"
+	"github.com/yakupatahanov/forge/internal/manifest"
 )
 
 func main() {
@@ -25,6 +28,7 @@ func rootCmd() *cobra.Command {
 		Long:  "Forge is a format-aware version control system with semantic diff and merge for any file type.",
 	}
 	root.AddCommand(
+		cloneCmd(),
 		diffCmd(),
 		mergeCmd(),
 		mergeFileCmd(),
@@ -41,6 +45,110 @@ func defaultRegistry() *handler.Registry {
 	reg := handler.NewRegistry()
 	reg.Register(text.New())
 	return reg
+}
+
+// ── forge clone ───────────────────────────────────────────────────────────────
+
+func cloneCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "clone <url> [directory]",
+		Short: "Clone a Forge repository and report required handlers",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE:  runClone,
+	}
+}
+
+func runClone(_ *cobra.Command, args []string) error {
+	url := args[0]
+	dir := ""
+	if len(args) == 2 {
+		dir = args[1]
+	} else {
+		dir = repoNameFromURL(url)
+	}
+
+	fmt.Printf("Cloning into '%s'...\n", dir)
+
+	_, err := gogit.PlainClone(dir, false, &gogit.CloneOptions{
+		URL:      url,
+		Progress: os.Stdout,
+	})
+	if err != nil {
+		return fmt.Errorf("clone failed: %w", err)
+	}
+
+	reportMissingHandlers(dir)
+	return nil
+}
+
+// reportMissingHandlers reads .forge/handlers and lists any requirements that
+// are not covered by the currently installed handler registry.
+func reportMissingHandlers(repoDir string) {
+	m, err := manifest.LoadHandlers(repoDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "forge: warning: could not read .forge/handlers: %v\n", err)
+		return
+	}
+	if len(m.Require) == 0 {
+		return
+	}
+
+	reg := defaultRegistry()
+
+	// Collect patterns whose only match is the TextHandler catch-all — meaning
+	// no dedicated handler is installed for them.
+	var missing []string
+	for pattern, req := range m.Require {
+		sample := patternToSample(pattern)
+		h, err := reg.Resolve(sample)
+		if err != nil || isTextFallback(h) {
+			missing = append(missing, fmt.Sprintf(
+				"  %-20s  %s@%s\n                         install from: %s",
+				pattern, req.Handler, req.Version, req.Registry,
+			))
+		}
+	}
+
+	if len(missing) == 0 {
+		return
+	}
+
+	sort.Strings(missing)
+	fmt.Println()
+	fmt.Println("This repository requires handlers that are not installed:")
+	for _, m := range missing {
+		fmt.Println(m)
+	}
+	fmt.Println()
+	fmt.Println("Run `forge handler install` to install them.  (available in M4)")
+}
+
+// patternToSample turns a glob like "*.blend" into "file.blend" so the
+// registry can attempt to resolve it.
+func patternToSample(pattern string) string {
+	return strings.NewReplacer("*", "file", "?", "x").Replace(pattern)
+}
+
+// isTextFallback returns true if h is the catch-all TextHandler, meaning no
+// dedicated handler was found for the pattern.
+func isTextFallback(h handler.ForgeHandler) bool {
+	_, ok := h.(*text.Handler)
+	return ok
+}
+
+// repoNameFromURL derives a local directory name from a clone URL.
+func repoNameFromURL(url string) string {
+	// Strip trailing slash and .git suffix.
+	url = strings.TrimRight(url, "/")
+	url = strings.TrimSuffix(url, ".git")
+	// Take the last path segment (works for https:// and git@host:user/repo).
+	if i := strings.LastIndexAny(url, "/:"); i >= 0 {
+		url = url[i+1:]
+	}
+	if url == "" {
+		return "repo"
+	}
+	return url
 }
 
 // ── forge diff ────────────────────────────────────────────────────────────────
