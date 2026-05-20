@@ -41,9 +41,10 @@ Any git host (including ForgeHub) works out of the box. Forge repos are git repo
 │  forge diff · forge merge · forge log   │
 ├─────────────────────────────────────────┤
 │           Handler Registry              │  ← resolves handler by file path/ext
-├──────────┬──────────┬───────────────────┤
-│  Text    │  glTF    │  Community …      │  ← ForgeHandler implementations
-│ Handler  │ Handler  │  .psd .svg .blend │
+├───────────────────────┬─────────────────┤
+│  Official handlers    │  Community      │  ← loaded from sources.list registries
+│  Text · glTF · OBJ    │  .blend .ptex   │
+│  Raster · JSON · …    │  .usd .hip …    │
 ├─────────────────────────────────────────┤
 │              libgit2 (MIT)              │  ← storage, transport, refs, DAG
 │   commits · trees · blobs · push/pull  │
@@ -115,22 +116,34 @@ type SemanticConflict struct {
 Handlers can operate at different levels of abstraction. A high-level domain handler covers a broad class; a low-level one targets a specific format. Both implement the same interface.
 
 ```
-Domain level    Example handler         Covers
-─────────────────────────────────────────────────────────────
-High (broad)    3DHandler               any 3D format (fallback)
-Mid             GltfHandler             .glb, .gltf
-Mid             ObjHandler              .obj + .mtl
-Low (specific)  BlenderHandler          .blend (via Blender's Python API)
+Domain level    Handler                 Covers                          Tier
+───────────────────────────────────────────────────────────────────────────────
+High (broad)    3DHandler               any 3D format (fallback)        Official
+Mid             GltfHandler             .glb, .gltf                     Official
+Mid             ObjHandler              .obj + .mtl                     Official
 
-High            RasterImageHandler      any image (pixel diff)
-Mid             PsdHandler              .psd (layer-aware diff/merge)
+High            RasterImageHandler      any image (pixel diff)          Official
+Mid             PsdHandler              .psd (layer-aware diff/merge)   Official
 
-High            TextHandler             any text (ships with Forge)
-Mid             JsonHandler             .json (key-path aware diff)
-Low             PackageJsonHandler      package.json (dep-aware merge)
+High            TextHandler             any text                        Official
+Mid             JsonHandler             .json (key-path aware diff)     Official
+Low             PackageJsonHandler      package.json (dep-aware merge)  Official
+
+Low (specific)  BlenderHandler          .blend                          Community
+Low             PtexHandler             .ptex                           Community
+Low             UsdHandler              .usd, .usda, .usdc              Community
 ```
 
 The registry walks from most-specific to least-specific and uses the first matching handler. Community handlers can insert at any level.
+
+If no handler is available for a file, Forge reports it explicitly rather than silently falling back:
+
+```
+forge diff character.blend
+  → No handler available for .blend
+  → Install one: forge handler sources / forge handler install
+  → Falling back to binary diff
+```
 
 ---
 
@@ -148,20 +161,41 @@ If no handler matches, Forge falls back to git's built-in binary diff (same as t
 
 ---
 
-## Community Handler Ecosystem
+## Handler Ecosystem
 
-The goal is thousands of community-maintained handlers, following the same model as:
+### Official handlers
 
-- **Tree-sitter** — any language's grammar in one interface
-- **LSP** — any language's IDE features in one protocol  
-- **Prettier plugins** — any file format, one formatter interface
+Forge ships and maintains a focused set of official handlers covering the most critical domains: 3D geometry, raster images, and text-based formats. These are tested, versioned, and updated with Forge itself.
 
-A handler is a small package that:
-1. Implements `ForgeHandler`
-2. Declares which file patterns it handles (`*.glb`, `*.psd`, `*.usd`, etc.)
-3. Is registered in a central handler registry (or loaded locally via config)
+The goal is quality over breadth — if a format is widely used and well-specified, it belongs here. If it requires a proprietary runtime or deep domain expertise, it belongs in the community tier.
 
-Proprietary formats are solved at the handler level, not by Forge itself. A `.blend` handler uses Blender's Python API. A `.ptex` handler uses NVIDIA's open-source library. Forge stays clean and format-agnostic.
+### Community handlers
+
+Forge doesn't try to maintain handlers for every format in existence. Instead, the community builds and distributes its own handlers via independent registries. Forge discovers them the same way package managers discover repositories: a `sources.list` file that lists trusted registry URLs.
+
+```
+# ~/.forge/sources.list
+https://handlers.blendercommunity.org
+https://forge-handlers.nvidia.com
+https://forge.acmestudio.internal/handlers
+```
+
+Users opt in to a registry explicitly. Forge makes no guarantees about handlers sourced from outside the official tier — trust is delegated to the user and the registry maintainer.
+
+### Per-repo handler manifest
+
+A `.forge/handlers` file in the repo root declares which handlers the repo depends on and where to find them. This travels with the repo so collaborators know what they need upfront.
+
+```toml
+# .forge/handlers
+[require]
+"*.blend" = { registry = "https://handlers.blendercommunity.org", handler = "blender/blend-handler", version = "1.2.0" }
+"*.ptex"  = { registry = "https://forge-handlers.nvidia.com",     handler = "nvidia/ptex-handler",   version = "0.9.1" }
+```
+
+When a handler listed in `.forge/handlers` is not installed locally, Forge reports it clearly and suggests where to get it, rather than silently degrading.
+
+See [docs/handler-ecosystem.md](docs/handler-ecosystem.md) for the full ecosystem design.
 
 ---
 
@@ -207,9 +241,10 @@ A glTF handler in the CLI produces a `StructuredDiff`. ForgeHub's `GltfDiffViewe
 
 ### M4 — Community SDK
 - [ ] Published `ForgeHandler` interface as a standalone package
-- [ ] Handler registry server (discover and install community handlers)
+- [ ] `sources.list` registry discovery (`forge handler sources add <url>`)
+- [ ] Per-repo `.forge/handlers` manifest with registry pinning
+- [ ] `forge handler install` / `forge handler list` / `forge handler sources`
 - [ ] Documentation and example handler template
-- [ ] `forge handler install gltf` / `forge handler list`
 
 ---
 
@@ -237,4 +272,4 @@ Handlers can be compiled into Forge (built-in) or loaded as external processes v
 
 3. **Forge vs git interoperability** — a plain `git diff model.glb` from someone without Forge should still work (returns binary diff). Forge-specific metadata (handler hints, structured diff cache) lives in git notes or a `.forge` config file, not in the object store.
 
-4. **Handler trust model** — community handlers run code on the user's machine. A sandboxing or signature model is needed before `forge handler install` is safe at scale.
+4. **Handler sandboxing** — community handlers run code on the user's machine. The subprocess/stdio protocol (same pattern as LSP) isolates handlers from Forge's process, but OS-level sandboxing (seccomp, WASI) is a longer-term consideration for untrusted registries.
