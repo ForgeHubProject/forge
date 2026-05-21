@@ -113,51 +113,49 @@ type SemanticConflict struct {
 
 ## Handler Domains
 
-Handlers can operate at different levels of abstraction. A high-level domain handler covers a broad class; a low-level one targets a specific format. Both implement the same interface.
+Domains group related formats under a shared abstraction. A domain acts as the
+fallback handler for any format in its family; specific handlers within a domain
+provide richer semantic diff and merge for individual formats.
 
 ```
-Domain level    Handler                 Covers                          Tier
-───────────────────────────────────────────────────────────────────────────────
-High (broad)    3DHandler               any 3D format (fallback)        Official
-Mid             GltfHandler             .glb, .gltf                     Official
-Mid             ObjHandler              .obj + .mtl                     Official
+Domain          Specific handler        Covers                  Tier
+────────────────────────────────────────────────────────────────────────────
+3d (domain)     —                       any 3D format fallback  Official
+                GltfHandler             .glb, .gltf             Official (M2)
+                ObjHandler              .obj + .mtl             Official (M2)
+                BlenderHandler          .blend                  Community
 
-High            RasterImageHandler      any image (pixel diff)          Official
-Mid             PsdHandler              .psd (layer-aware diff/merge)   Official
+image (domain)  —                       any image fallback      Official
+                PsdHandler              .psd (layer-aware)      Official (future)
 
-High            TextHandler             any text                        Official
-Mid             JsonHandler             .json (key-path aware diff)     Official
-Low             PackageJsonHandler      package.json (dep-aware merge)  Official
+text (domain)   TextHandler             any text (catch-all)    Official
+                JsonHandler             .json (key-path diff)   Official (future)
 
-Low (specific)  BlenderHandler          .blend                          Community
-Low             PtexHandler             .ptex                           Community
-Low             UsdHandler              .usd, .usda, .usdc              Community
+(community)     AudioDomain             .mp3 .wav .ogg …        Community
 ```
 
-The registry walks from most-specific to least-specific and uses the first matching handler. Community handlers can insert at any level.
-
-If no handler is available for a file, Forge reports it explicitly rather than silently falling back:
+The registry walks domains first, then specific handlers within each domain,
+then the text catch-all. `forge status` shows the resolved level for every file:
 
 ```
-forge diff character.blend
-  → No handler available for .blend
-  → Install one: forge handler sources / forge handler install
-  → Falling back to binary diff
+ M  character.glb     [3d › gltf]    ← domain + specific handler
+ M  texture.png       [image]        ← domain fallback (no specific handler yet)
+ M  README.md         [text]         ← catch-all
 ```
-
----
 
 ## Handler Resolution
 
 ```
 forge diff src/scene.glb
-  → registry.Resolve("src/scene.glb")
-  → [BlenderHandler✗, GltfHandler✓]  ← first match wins
+  → registry.ResolveFull("src/scene.glb")
+  → ThreeDDomain matches → GltfHandler matches within domain
   → GltfHandler.Diff(base, head)
   → renders structured diff
-```
 
-If no handler matches, Forge falls back to git's built-in binary diff (same as today, no regression).
+forge diff character.blend  (no BlenderHandler installed)
+  → ThreeDDomain matches → no specific handler
+  → ThreeDDomain.Diff(base, head)  ← domain fallback: file-size diff
+```
 
 ---
 
@@ -221,16 +219,18 @@ A glTF handler in the CLI produces a `StructuredDiff`. ForgeHub's `GltfDiffViewe
 - [x] Define `StructuredDiff` wire format ([JSON schema](docs/structured-diff-schema.json) · [spec](docs/structured-diff.md))
 
 ### M1 — Core + TextHandler
-- [x] Forge CLI skeleton (`forge diff`, `forge merge`, `forge log`, `forge push`, `forge pull`)
+- [x] Forge CLI skeleton (`forge init`, `forge clone`, `forge status`, `forge diff`, `forge merge-file`, `forge push`, `forge pull`)
 - [x] Git integration via go-git (pure Go; git2go deferred until libgit2 1.7.x release is published)
-- [x] `TextHandler` — line-level diff, establishes baseline parity with git
-- [x] Handler registry with first-match resolution
+- [x] `TextHandler` — line-level diff and 3-way merge matching git behaviour
+- [x] Domain abstraction — `ThreeDDomain` and `ImageDomain` as official domain fallbacks
+- [x] Registry with domain-aware resolution (`[domain › handler]` labels)
+- [x] `.forge/handlers` domain manifest; `forge clone` reports missing domains
 
 ### M2 — First non-text handler (GltfHandler)
 - [ ] Parse glTF/GLB scene graph into semantic representation
-- [ ] `GltfHandler.Diff()` — node/mesh/material-level diff
-- [ ] `forge diff model.glb` produces human-readable scene diff
-- [ ] ForgeHub renders the diff (already has viewer registry)
+- [ ] `GltfHandler.Diff()` — node/mesh/material-level diff, registered into `ThreeDDomain`
+- [ ] `forge diff model.glb` produces human-readable scene diff (`[3d › gltf]`)
+- [ ] ForgeHub renders the diff
 - [ ] `GltfHandler.Merge()` — non-overlapping node changes merge cleanly
 
 ### M3 — Conflict UX

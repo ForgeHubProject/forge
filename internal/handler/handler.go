@@ -60,3 +60,29 @@ type ForgeHandler interface {
 	// Handlers that cannot merge return ErrNotSupported.
 	Merge(base, ours, theirs Blob) (Blob, *ConflictInfo, error)
 }
+
+// Namer is an optional interface handlers may implement to expose their
+// format identifier. Used by forge status and other display contexts.
+type Namer interface {
+	Format() string
+}
+
+// Domain groups a family of ForgeHandlers under a shared abstraction
+// (e.g. all 3D formats, all raster images). It is itself a ForgeHandler,
+// acting as the domain-level fallback when no specific handler matches.
+//
+// Domains are the unit of installation: `forge domain install 3d` installs
+// the entire 3D domain and all its handlers.
+type Domain interface {
+	ForgeHandler
+	Namer // Format() returns the domain name, e.g. "3d", "image"
+
+	// DomainRegister adds a specific handler to this domain.
+	// Handlers are checked in registration order — most-specific first.
+	DomainRegister(h ForgeHandler)
+
+	// DomainResolve returns the most specific handler for path within this
+	// domain, or nil if no specific handler matches (caller uses the domain
+	// itself as the fallback).
+	DomainResolve(path string) ForgeHandler
+}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -14,6 +15,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/yakupatahanov/forge/internal/gitrepo"
 	"github.com/yakupatahanov/forge/internal/handler"
+	"github.com/yakupatahanov/forge/internal/handler/domain"
+	forgegltf "github.com/yakupatahanov/forge/internal/handler/gltf"
 	"github.com/yakupatahanov/forge/internal/handler/text"
 	"github.com/yakupatahanov/forge/internal/manifest"
 )
@@ -31,7 +34,9 @@ func rootCmd() *cobra.Command {
 		Long:  "Forge is a format-aware version control system with semantic diff and merge for any file type.",
 	}
 	root.AddCommand(
+		initCmd(),
 		cloneCmd(),
+		statusCmd(),
 		diffCmd(),
 		mergeCmd(),
 		mergeFileCmd(),
@@ -42,12 +47,150 @@ func rootCmd() *cobra.Command {
 	return root
 }
 
-// defaultRegistry builds the handler registry with official handlers.
-// Handlers are registered most-specific first; TextHandler is the catch-all.
+// defaultRegistry builds the handler registry with official domains and handlers.
+// Domains are checked before the TextHandler catch-all.
+// Within each domain, specific handlers are registered most-specific first.
 func defaultRegistry() *handler.Registry {
 	reg := handler.NewRegistry()
-	reg.Register(text.New())
+
+	threeD := domain.NewThreeD()
+	threeD.DomainRegister(forgegltf.New())
+	reg.Register(threeD)
+
+	reg.Register(domain.NewImage())
+	reg.Register(text.New()) // catch-all — must be last
 	return reg
+}
+
+// ── forge init ────────────────────────────────────────────────────────────────
+
+func initCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "init [directory]",
+		Short: "Create a new Forge repository",
+		Args:  cobra.MaximumNArgs(1),
+		RunE:  runInit,
+	}
+}
+
+func runInit(_ *cobra.Command, args []string) error {
+	dir := "."
+	if len(args) == 1 {
+		dir = args[0]
+	}
+
+	if _, err := gogit.PlainInit(dir, false); err != nil && !errors.Is(err, gogit.ErrRepositoryAlreadyExists) {
+		return fmt.Errorf("init failed: %w", err)
+	}
+
+	forgeDir := filepath.Join(dir, ".forge")
+	if err := os.MkdirAll(forgeDir, 0755); err != nil {
+		return fmt.Errorf("creating .forge/: %w", err)
+	}
+
+	handlersPath := filepath.Join(forgeDir, "handlers")
+	if _, err := os.Stat(handlersPath); os.IsNotExist(err) {
+		template := "# .forge/handlers\n" +
+			"# Declare which domains this repository requires.\n" +
+			"# Official domains (3d, image, text, audio, video) ship with Forge.\n" +
+			"# Community domains need a registry entry.\n" +
+			"#\n" +
+			"# [domains]\n" +
+			"# require = [\"3d\", \"image\"]\n" +
+			"#\n" +
+			"# [community.audio]\n" +
+			"# registry = \"https://forge-audio.example.com\"\n" +
+			"# version  = \"1.0.0\"\n"
+		if err := os.WriteFile(handlersPath, []byte(template), 0644); err != nil {
+			return fmt.Errorf("creating .forge/handlers: %w", err)
+		}
+	}
+
+	abs, _ := filepath.Abs(dir)
+	fmt.Printf("Initialized Forge repository in %s\n", abs)
+	return nil
+}
+
+// ── forge status ──────────────────────────────────────────────────────────────
+
+func statusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show working tree status with handler annotations",
+		RunE:  runStatus,
+	}
+}
+
+func runStatus(_ *cobra.Command, _ []string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+
+	r, err := gogit.PlainOpenWithOptions(cwd, &gogit.PlainOpenOptions{DetectDotGit: true})
+	if err != nil {
+		return fmt.Errorf("not a git repository")
+	}
+
+	wt, err := r.Worktree()
+	if err != nil {
+		return err
+	}
+
+	st, err := wt.Status()
+	if err != nil {
+		return err
+	}
+
+	if st.IsClean() {
+		fmt.Println("nothing to commit, working tree clean")
+		return nil
+	}
+
+	reg := defaultRegistry()
+
+	paths := make([]string, 0, len(st))
+	for p := range st {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+
+	for _, p := range paths {
+		fs := st[p]
+		label := handlerLabel(p, reg)
+		fmt.Printf("%c%c  %-45s %s\n", rune(fs.Staging), rune(fs.Worktree), p, label)
+	}
+	return nil
+}
+
+// handlerLabel returns a coloured handler annotation for a file path.
+// Format:
+//
+//	[3d › gltf]   — domain + specific handler
+//	[3d]          — domain fallback (no specific handler installed)
+//	[text]        — standalone catch-all
+func handlerLabel(path string, reg *handler.Registry) string {
+	dom, h, err := reg.ResolveFull(path)
+	if err != nil {
+		return "\x1b[31m[no handler]\x1b[0m"
+	}
+
+	handlerName := ""
+	if n, ok := h.(handler.Namer); ok {
+		handlerName = n.Format()
+	}
+
+	if dom != nil {
+		domName := dom.Format()
+		if h == handler.ForgeHandler(dom) {
+			ext := strings.ToLower(filepath.Ext(path))
+			return fmt.Sprintf("\x1b[33m[%s — no %s handler]\x1b[0m", domName, ext)
+		}
+		return fmt.Sprintf("\x1b[36m[%s › %s]\x1b[0m", domName, handlerName)
+	}
+
+	// Standalone handler (e.g. TextHandler).
+	return fmt.Sprintf("\x1b[36m[%s]\x1b[0m", handlerName)
 }
 
 // ── forge clone ───────────────────────────────────────────────────────────────
@@ -96,19 +239,29 @@ func runClone(cmd *cobra.Command, args []string) error {
 }
 
 // buildCloneOptions constructs CloneOptions with the appropriate auth method.
-// For SSH URLs it loads the key file; for HTTPS it uses a token if provided.
+// For SSH URLs: tries the SSH agent first (same as git), then falls back to
+// reading the key file directly. For HTTPS: uses a token if provided.
 // Public repos need no auth.
 func buildCloneOptions(rawURL, token, sshKeyPath, sshPassword string) (*gogit.CloneOptions, error) {
 	opts := &gogit.CloneOptions{URL: rawURL}
 
 	if isSSHURL(rawURL) {
+		// Try SSH agent first — this is how git works and means no passphrase
+		// is needed as long as the key is loaded in the agent.
+		if agent, err := gogitssh.NewSSHAgentAuth("git"); err == nil {
+			opts.Auth = agent
+			return opts, nil
+		}
+
+		// Agent unavailable — fall back to key file.
 		keys, err := gogitssh.NewPublicKeysFromFile("git", sshKeyPath, sshPassword)
 		if err != nil {
 			return nil, fmt.Errorf(
-				"could not load SSH key %s: %w\n"+
-					"  Use --ssh-key to specify a different key, or\n"+
-					"  clone over HTTPS with a token: forge clone <https-url> --token <token>",
-				sshKeyPath, err,
+				"SSH agent unavailable and could not load key %s: %w\n"+
+					"  Start an SSH agent and run: ssh-add %s\n"+
+					"  Or pass the key passphrase: forge clone <url> --ssh-password <passphrase>\n"+
+					"  Or clone over HTTPS with a token: forge clone <https-url> --token <token>",
+				sshKeyPath, err, sshKeyPath,
 			)
 		}
 		opts.Auth = keys
@@ -155,30 +308,36 @@ func defaultSSHKey() string {
 	return filepath.Join(home, ".ssh", "id_ed25519")
 }
 
-// reportMissingHandlers reads .forge/handlers and lists any requirements that
-// are not covered by the currently installed handler registry.
+// reportMissingHandlers reads .forge/handlers and reports any required domains
+// that are not covered by the currently installed registry.
 func reportMissingHandlers(repoDir string) {
 	m, err := manifest.LoadHandlers(repoDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "forge: warning: could not read .forge/handlers: %v\n", err)
 		return
 	}
-	if len(m.Require) == 0 {
-		return
-	}
 
 	reg := defaultRegistry()
+	installedDomains := map[string]bool{}
+	for _, d := range reg.Domains() {
+		installedDomains[d.Format()] = true
+	}
 
-	// Collect patterns whose only match is the TextHandler catch-all — meaning
-	// no dedicated handler is installed for them.
 	var missing []string
-	for pattern, req := range m.Require {
-		sample := patternToSample(pattern)
-		h, err := reg.Resolve(sample)
-		if err != nil || isTextFallback(h) {
+
+	// Official domains listed in [domains] require = [...]
+	for _, name := range m.Domains.Require {
+		if !installedDomains[name] {
+			missing = append(missing, fmt.Sprintf("  %-10s  (official)  forge domain install %s", name, name))
+		}
+	}
+
+	// Community domains listed in [community]
+	for name, src := range m.Community {
+		if !installedDomains[name] {
 			missing = append(missing, fmt.Sprintf(
-				"  %-20s  %s@%s\n                         install from: %s",
-				pattern, req.Handler, req.Version, req.Registry,
+				"  %-10s  %s@%s\n              forge domain install %s --registry %s",
+				name, name, src.Version, name, src.Registry,
 			))
 		}
 	}
@@ -189,25 +348,12 @@ func reportMissingHandlers(repoDir string) {
 
 	sort.Strings(missing)
 	fmt.Println()
-	fmt.Println("This repository requires handlers that are not installed:")
+	fmt.Println("This repository requires domains that are not installed:")
 	for _, m := range missing {
 		fmt.Println(m)
 	}
 	fmt.Println()
-	fmt.Println("Run `forge handler install` to install them.  (available in M4)")
-}
-
-// patternToSample turns a glob like "*.blend" into "file.blend" so the
-// registry can attempt to resolve it.
-func patternToSample(pattern string) string {
-	return strings.NewReplacer("*", "file", "?", "x").Replace(pattern)
-}
-
-// isTextFallback returns true if h is the catch-all TextHandler, meaning no
-// dedicated handler was found for the pattern.
-func isTextFallback(h handler.ForgeHandler) bool {
-	_, ok := h.(*text.Handler)
-	return ok
+	fmt.Println("(forge domain install is available in M4)")
 }
 
 // repoNameFromURL derives a local directory name from a clone URL.
@@ -301,26 +447,56 @@ func renderDiff(path string, diff handler.StructuredDiff) {
 		return
 	}
 	fmt.Printf("\x1b[1m--- a/%s\n+++ b/%s\x1b[0m\n", path, path)
-	renderChanges(diff.Changes, 0)
+	renderChanges(diff.Changes, "", "")
 }
 
-func renderChanges(changes []handler.DiffChange, depth int) {
-	indent := strings.Repeat("  ", depth)
-	for _, c := range changes {
+// renderChanges renders a slice of DiffChanges with optional tree connectors.
+// connPrefix is prepended to each item in this slice (includes the connector
+// character); contPrefix is the prefix for continuation / child lines.
+// At the top level both are empty, giving flat output compatible with the
+// text handler's existing format.
+func renderChanges(changes []handler.DiffChange, connPrefix, contPrefix string) {
+	n := len(changes)
+	for i, c := range changes {
+		isLast := i == n-1
 		label := c.Label
 		if label == "" {
 			label = c.Path
 		}
-		switch c.Kind {
-		case handler.Added:
-			fmt.Printf("\x1b[32m%s+ [%s] %v\x1b[0m\n", indent, label, c.After)
-		case handler.Removed:
-			fmt.Printf("\x1b[31m%s- [%s] %v\x1b[0m\n", indent, label, c.Before)
-		case handler.Modified:
-			fmt.Printf("\x1b[33m%s~ [%s] %v → %v\x1b[0m\n", indent, label, c.Before, c.After)
+
+		// Compute connector for nested items.
+		myConn := connPrefix
+		childConn := contPrefix + "  "
+		childCont := contPrefix + "  "
+		if connPrefix != "" {
+			if isLast {
+				myConn = contPrefix + "└─ "
+				childConn = contPrefix + "   "
+				childCont = contPrefix + "   "
+			} else {
+				myConn = contPrefix + "├─ "
+				childConn = contPrefix + "│  "
+				childCont = contPrefix + "│  "
+			}
 		}
+
 		if len(c.Children) > 0 {
-			renderChanges(c.Children, depth+1)
+			// Section / group node: print label as a plain header, then recurse.
+			if connPrefix == "" {
+				fmt.Printf("\n%s\n", label)
+			} else {
+				fmt.Printf("%s%s\n", myConn, label)
+			}
+			renderChanges(c.Children, childConn, childCont)
+		} else {
+			switch c.Kind {
+			case handler.Added:
+				fmt.Printf("\x1b[32m%s+ [%s] %v\x1b[0m\n", myConn, label, c.After)
+			case handler.Removed:
+				fmt.Printf("\x1b[31m%s- [%s] %v\x1b[0m\n", myConn, label, c.Before)
+			case handler.Modified:
+				fmt.Printf("\x1b[33m%s%s  %v  →  %v\x1b[0m\n", myConn, label, c.Before, c.After)
+			}
 		}
 	}
 }

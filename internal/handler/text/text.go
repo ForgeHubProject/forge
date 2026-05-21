@@ -16,6 +16,8 @@ func New() *Handler { return &Handler{} }
 // Match returns true for all paths — text is the fallback handler.
 func (h *Handler) Match(_ string) bool { return true }
 
+func (h *Handler) Format() string { return "text" }
+
 func (h *Handler) Diff(base, head handler.Blob) (handler.StructuredDiff, error) {
 	dmp := diffmatchpatch.New()
 	baseChars, headChars, lines := dmp.DiffLinesToChars(string(base), string(head))
