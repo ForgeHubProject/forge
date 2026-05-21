@@ -178,8 +178,8 @@ func handlerLabel(path string, reg *handler.Registry) string {
 	if dom != nil {
 		domName := dom.Format()
 		if h == handler.ForgeHandler(dom) {
-			// Domain fallback — no specific handler installed yet.
-			return fmt.Sprintf("\x1b[33m[%s]\x1b[0m", domName)
+			// Domain matched but no specific handler is installed.
+			return fmt.Sprintf("\x1b[33m[%s — no handler installed]\x1b[0m", domName)
 		}
 		// Specific handler within a domain.
 		return fmt.Sprintf("\x1b[36m[%s › %s]\x1b[0m", domName, handlerName)
