@@ -96,19 +96,29 @@ func runClone(cmd *cobra.Command, args []string) error {
 }
 
 // buildCloneOptions constructs CloneOptions with the appropriate auth method.
-// For SSH URLs it loads the key file; for HTTPS it uses a token if provided.
+// For SSH URLs: tries the SSH agent first (same as git), then falls back to
+// reading the key file directly. For HTTPS: uses a token if provided.
 // Public repos need no auth.
 func buildCloneOptions(rawURL, token, sshKeyPath, sshPassword string) (*gogit.CloneOptions, error) {
 	opts := &gogit.CloneOptions{URL: rawURL}
 
 	if isSSHURL(rawURL) {
+		// Try SSH agent first — this is how git works and means no passphrase
+		// is needed as long as the key is loaded in the agent.
+		if agent, err := gogitssh.NewSSHAgentAuth("git"); err == nil {
+			opts.Auth = agent
+			return opts, nil
+		}
+
+		// Agent unavailable — fall back to key file.
 		keys, err := gogitssh.NewPublicKeysFromFile("git", sshKeyPath, sshPassword)
 		if err != nil {
 			return nil, fmt.Errorf(
-				"could not load SSH key %s: %w\n"+
-					"  Use --ssh-key to specify a different key, or\n"+
-					"  clone over HTTPS with a token: forge clone <https-url> --token <token>",
-				sshKeyPath, err,
+				"SSH agent unavailable and could not load key %s: %w\n"+
+					"  Start an SSH agent and run: ssh-add %s\n"+
+					"  Or pass the key passphrase: forge clone <url> --ssh-password <passphrase>\n"+
+					"  Or clone over HTTPS with a token: forge clone <https-url> --token <token>",
+				sshKeyPath, err, sshKeyPath,
 			)
 		}
 		opts.Auth = keys
