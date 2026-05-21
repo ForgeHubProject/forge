@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/go-git/go-git/v5 v5.19.1
+	github.com/qmuntal/gltf v0.28.0
 	github.com/sergi/go-diff v1.4.0
 	github.com/spf13/cobra v1.10.2
 )
