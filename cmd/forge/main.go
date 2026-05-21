@@ -16,6 +16,7 @@ import (
 	"github.com/yakupatahanov/forge/internal/gitrepo"
 	"github.com/yakupatahanov/forge/internal/handler"
 	"github.com/yakupatahanov/forge/internal/handler/domain"
+	forgegltf "github.com/yakupatahanov/forge/internal/handler/gltf"
 	"github.com/yakupatahanov/forge/internal/handler/text"
 	"github.com/yakupatahanov/forge/internal/manifest"
 )
@@ -51,7 +52,11 @@ func rootCmd() *cobra.Command {
 // Within each domain, specific handlers are registered most-specific first.
 func defaultRegistry() *handler.Registry {
 	reg := handler.NewRegistry()
-	reg.Register(domain.NewThreeD())
+
+	threeD := domain.NewThreeD()
+	threeD.DomainRegister(forgegltf.New())
+	reg.Register(threeD)
+
 	reg.Register(domain.NewImage())
 	reg.Register(text.New()) // catch-all — must be last
 	return reg
@@ -442,26 +447,56 @@ func renderDiff(path string, diff handler.StructuredDiff) {
 		return
 	}
 	fmt.Printf("\x1b[1m--- a/%s\n+++ b/%s\x1b[0m\n", path, path)
-	renderChanges(diff.Changes, 0)
+	renderChanges(diff.Changes, "", "")
 }
 
-func renderChanges(changes []handler.DiffChange, depth int) {
-	indent := strings.Repeat("  ", depth)
-	for _, c := range changes {
+// renderChanges renders a slice of DiffChanges with optional tree connectors.
+// connPrefix is prepended to each item in this slice (includes the connector
+// character); contPrefix is the prefix for continuation / child lines.
+// At the top level both are empty, giving flat output compatible with the
+// text handler's existing format.
+func renderChanges(changes []handler.DiffChange, connPrefix, contPrefix string) {
+	n := len(changes)
+	for i, c := range changes {
+		isLast := i == n-1
 		label := c.Label
 		if label == "" {
 			label = c.Path
 		}
-		switch c.Kind {
-		case handler.Added:
-			fmt.Printf("\x1b[32m%s+ [%s] %v\x1b[0m\n", indent, label, c.After)
-		case handler.Removed:
-			fmt.Printf("\x1b[31m%s- [%s] %v\x1b[0m\n", indent, label, c.Before)
-		case handler.Modified:
-			fmt.Printf("\x1b[33m%s~ [%s] %v → %v\x1b[0m\n", indent, label, c.Before, c.After)
+
+		// Compute connector for nested items.
+		myConn := connPrefix
+		childConn := contPrefix + "  "
+		childCont := contPrefix + "  "
+		if connPrefix != "" {
+			if isLast {
+				myConn = contPrefix + "└─ "
+				childConn = contPrefix + "   "
+				childCont = contPrefix + "   "
+			} else {
+				myConn = contPrefix + "├─ "
+				childConn = contPrefix + "│  "
+				childCont = contPrefix + "│  "
+			}
 		}
+
 		if len(c.Children) > 0 {
-			renderChanges(c.Children, depth+1)
+			// Section / group node: print label as a plain header, then recurse.
+			if connPrefix == "" {
+				fmt.Printf("\n%s\n", label)
+			} else {
+				fmt.Printf("%s%s\n", myConn, label)
+			}
+			renderChanges(c.Children, childConn, childCont)
+		} else {
+			switch c.Kind {
+			case handler.Added:
+				fmt.Printf("\x1b[32m%s+ [%s] %v\x1b[0m\n", myConn, label, c.After)
+			case handler.Removed:
+				fmt.Printf("\x1b[31m%s- [%s] %v\x1b[0m\n", myConn, label, c.Before)
+			case handler.Modified:
+				fmt.Printf("\x1b[33m%s%s  %v  →  %v\x1b[0m\n", myConn, label, c.Before, c.After)
+			}
 		}
 	}
 }
