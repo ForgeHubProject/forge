@@ -60,3 +60,9 @@ type ForgeHandler interface {
 	// Handlers that cannot merge return ErrNotSupported.
 	Merge(base, ours, theirs Blob) (Blob, *ConflictInfo, error)
 }
+
+// Namer is an optional interface handlers may implement to expose their
+// format identifier. Used by forge status and other display contexts.
+type Namer interface {
+	Format() string
+}
