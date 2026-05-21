@@ -2,14 +2,20 @@ package main
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
+	gogit "github.com/go-git/go-git/v5"
+	gogithttp "github.com/go-git/go-git/v5/plumbing/transport/http"
+	gogitssh "github.com/go-git/go-git/v5/plumbing/transport/ssh"
 	"github.com/spf13/cobra"
 	"github.com/yakupatahanov/forge/internal/gitrepo"
 	"github.com/yakupatahanov/forge/internal/handler"
 	"github.com/yakupatahanov/forge/internal/handler/text"
+	"github.com/yakupatahanov/forge/internal/manifest"
 )
 
 func main() {
@@ -25,8 +31,10 @@ func rootCmd() *cobra.Command {
 		Long:  "Forge is a format-aware version control system with semantic diff and merge for any file type.",
 	}
 	root.AddCommand(
+		cloneCmd(),
 		diffCmd(),
 		mergeCmd(),
+		mergeFileCmd(),
 		logCmd(),
 		pushCmd(),
 		pullCmd(),
@@ -40,6 +48,181 @@ func defaultRegistry() *handler.Registry {
 	reg := handler.NewRegistry()
 	reg.Register(text.New())
 	return reg
+}
+
+// ── forge clone ───────────────────────────────────────────────────────────────
+
+func cloneCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "clone <url> [directory]",
+		Short: "Clone a Forge repository and report required handlers",
+		Args:  cobra.RangeArgs(1, 2),
+		RunE:  runClone,
+	}
+	cmd.Flags().String("token", "", "Personal access token for HTTPS authentication")
+	cmd.Flags().String("ssh-key", defaultSSHKey(), "Path to SSH private key")
+	cmd.Flags().String("ssh-password", "", "Passphrase for the SSH private key (if encrypted)")
+	return cmd
+}
+
+func runClone(cmd *cobra.Command, args []string) error {
+	rawURL := args[0]
+	dir := ""
+	if len(args) == 2 {
+		dir = args[1]
+	} else {
+		dir = repoNameFromURL(rawURL)
+	}
+
+	token, _ := cmd.Flags().GetString("token")
+	sshKey, _ := cmd.Flags().GetString("ssh-key")
+	sshPassword, _ := cmd.Flags().GetString("ssh-password")
+
+	cloneOpts, err := buildCloneOptions(rawURL, token, sshKey, sshPassword)
+	if err != nil {
+		return err
+	}
+	cloneOpts.Progress = os.Stdout
+
+	fmt.Printf("Cloning into '%s'...\n", dir)
+
+	_, err = gogit.PlainClone(dir, false, cloneOpts)
+	if err != nil {
+		return fmt.Errorf("clone failed: %w", err)
+	}
+
+	reportMissingHandlers(dir)
+	return nil
+}
+
+// buildCloneOptions constructs CloneOptions with the appropriate auth method.
+// For SSH URLs it loads the key file; for HTTPS it uses a token if provided.
+// Public repos need no auth.
+func buildCloneOptions(rawURL, token, sshKeyPath, sshPassword string) (*gogit.CloneOptions, error) {
+	opts := &gogit.CloneOptions{URL: rawURL}
+
+	if isSSHURL(rawURL) {
+		keys, err := gogitssh.NewPublicKeysFromFile("git", sshKeyPath, sshPassword)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"could not load SSH key %s: %w\n"+
+					"  Use --ssh-key to specify a different key, or\n"+
+					"  clone over HTTPS with a token: forge clone <https-url> --token <token>",
+				sshKeyPath, err,
+			)
+		}
+		opts.Auth = keys
+		return opts, nil
+	}
+
+	// HTTPS: prefer explicit flag, then env vars.
+	if token == "" {
+		for _, env := range []string{"FORGE_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} {
+			if t := os.Getenv(env); t != "" {
+				token = t
+				break
+			}
+		}
+	}
+	if token != "" {
+		opts.Auth = &gogithttp.BasicAuth{Username: "x-token", Password: token}
+	}
+
+	return opts, nil
+}
+
+func isSSHURL(rawURL string) bool {
+	// SCP-style: git@github.com:user/repo.git
+	if strings.HasPrefix(rawURL, "git@") {
+		return true
+	}
+	u, err := url.Parse(rawURL)
+	return err == nil && u.Scheme == "ssh"
+}
+
+// defaultSSHKey returns ~/.ssh/id_ed25519 if it exists, else ~/.ssh/id_rsa.
+func defaultSSHKey() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	for _, name := range []string{"id_ed25519", "id_rsa", "id_ecdsa"} {
+		p := filepath.Join(home, ".ssh", name)
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return filepath.Join(home, ".ssh", "id_ed25519")
+}
+
+// reportMissingHandlers reads .forge/handlers and lists any requirements that
+// are not covered by the currently installed handler registry.
+func reportMissingHandlers(repoDir string) {
+	m, err := manifest.LoadHandlers(repoDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "forge: warning: could not read .forge/handlers: %v\n", err)
+		return
+	}
+	if len(m.Require) == 0 {
+		return
+	}
+
+	reg := defaultRegistry()
+
+	// Collect patterns whose only match is the TextHandler catch-all — meaning
+	// no dedicated handler is installed for them.
+	var missing []string
+	for pattern, req := range m.Require {
+		sample := patternToSample(pattern)
+		h, err := reg.Resolve(sample)
+		if err != nil || isTextFallback(h) {
+			missing = append(missing, fmt.Sprintf(
+				"  %-20s  %s@%s\n                         install from: %s",
+				pattern, req.Handler, req.Version, req.Registry,
+			))
+		}
+	}
+
+	if len(missing) == 0 {
+		return
+	}
+
+	sort.Strings(missing)
+	fmt.Println()
+	fmt.Println("This repository requires handlers that are not installed:")
+	for _, m := range missing {
+		fmt.Println(m)
+	}
+	fmt.Println()
+	fmt.Println("Run `forge handler install` to install them.  (available in M4)")
+}
+
+// patternToSample turns a glob like "*.blend" into "file.blend" so the
+// registry can attempt to resolve it.
+func patternToSample(pattern string) string {
+	return strings.NewReplacer("*", "file", "?", "x").Replace(pattern)
+}
+
+// isTextFallback returns true if h is the catch-all TextHandler, meaning no
+// dedicated handler was found for the pattern.
+func isTextFallback(h handler.ForgeHandler) bool {
+	_, ok := h.(*text.Handler)
+	return ok
+}
+
+// repoNameFromURL derives a local directory name from a clone URL.
+func repoNameFromURL(url string) string {
+	// Strip trailing slash and .git suffix.
+	url = strings.TrimRight(url, "/")
+	url = strings.TrimSuffix(url, ".git")
+	// Take the last path segment (works for https:// and git@host:user/repo).
+	if i := strings.LastIndexAny(url, "/:"); i >= 0 {
+		url = url[i+1:]
+	}
+	if url == "" {
+		return "repo"
+	}
+	return url
 }
 
 // ── forge diff ────────────────────────────────────────────────────────────────
@@ -153,6 +336,65 @@ func mergeCmd() *cobra.Command {
 			return fmt.Errorf("forge merge is not yet implemented (planned for M3)")
 		},
 	}
+}
+
+// ── forge merge-file ──────────────────────────────────────────────────────────
+
+func mergeFileCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "merge-file <base> <ours> <theirs>",
+		Short: "3-way merge three files using the format handler (like git merge-file)",
+		Long: `Performs a 3-way merge of BASE, OURS, and THEIRS using the appropriate
+format handler. The result is written back to OURS, matching git merge-file behaviour.
+
+Exits 0 on a clean merge, 1 if there are conflicts (conflict markers are
+written into OURS so you can inspect and resolve them).`,
+		Args: cobra.ExactArgs(3),
+		RunE: runMergeFile,
+	}
+}
+
+func runMergeFile(_ *cobra.Command, args []string) error {
+	basePath, oursPath, theirsPath := args[0], args[1], args[2]
+
+	base, err := os.ReadFile(basePath)
+	if err != nil {
+		return fmt.Errorf("reading base %s: %w", basePath, err)
+	}
+	ours, err := os.ReadFile(oursPath)
+	if err != nil {
+		return fmt.Errorf("reading ours %s: %w", oursPath, err)
+	}
+	theirs, err := os.ReadFile(theirsPath)
+	if err != nil {
+		return fmt.Errorf("reading theirs %s: %w", theirsPath, err)
+	}
+
+	reg := defaultRegistry()
+	h, err := reg.Resolve(oursPath)
+	if err != nil {
+		return err
+	}
+
+	merged, ci, err := h.Merge(base, ours, theirs)
+	if err != nil {
+		return fmt.Errorf("merge failed: %w", err)
+	}
+
+	if err := os.WriteFile(oursPath, merged, 0644); err != nil {
+		return fmt.Errorf("writing result to %s: %w", oursPath, err)
+	}
+
+	if ci != nil && len(ci.Conflicts) > 0 {
+		fmt.Fprintf(os.Stderr, "CONFLICT: %d conflict(s) in %s\n", len(ci.Conflicts), oursPath)
+		for _, c := range ci.Conflicts {
+			fmt.Fprintf(os.Stderr, "  %s\n", c.Path)
+		}
+		os.Exit(1)
+	}
+
+	fmt.Printf("Merged cleanly into %s\n", oursPath)
+	return nil
 }
 
 // ── forge log ─────────────────────────────────────────────────────────────────
