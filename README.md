@@ -215,7 +215,7 @@ A glTF handler in the CLI produces a `StructuredDiff`. ForgeHub's `GltfDiffViewe
 
 ### M0 — Spec (now)
 - [x] Finalize `ForgeHandler` interface
-- [x] Decide implementation language (Go + git2go)
+- [x] Decide implementation language (Go + go-git)
 - [x] Define `StructuredDiff` wire format ([JSON schema](docs/structured-diff-schema.json) · [spec](docs/structured-diff.md))
 
 ### M1 — Core + TextHandler
@@ -227,9 +227,9 @@ A glTF handler in the CLI produces a `StructuredDiff`. ForgeHub's `GltfDiffViewe
 - [x] `.forge/handlers` domain manifest; `forge clone` reports missing domains
 
 ### M2 — First non-text handler (GltfHandler)
-- [ ] Parse glTF/GLB scene graph into semantic representation
-- [ ] `GltfHandler.Diff()` — node/mesh/material-level diff, registered into `ThreeDDomain`
-- [ ] `forge diff model.glb` produces human-readable scene diff (`[3d › gltf]`)
+- [x] Parse glTF/GLB scene graph into semantic representation
+- [x] `GltfHandler.Diff()` — node/mesh/material-level diff, registered into `ThreeDDomain`
+- [x] `forge diff model.glb` produces human-readable scene diff (`[3d › gltf]`)
 - [ ] ForgeHub renders the diff
 - [ ] `GltfHandler.Merge()` — non-overlapping node changes merge cleanly
 
