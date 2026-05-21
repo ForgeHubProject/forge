@@ -231,7 +231,7 @@ A glTF handler in the CLI produces a `StructuredDiff`. ForgeHub's `GltfDiffViewe
 - [x] `GltfHandler.Diff()` — node/mesh/material-level diff, registered into `ThreeDDomain`
 - [x] `forge diff model.glb` produces human-readable scene diff (`[3d › gltf]`)
 - [ ] ForgeHub renders the diff
-- [ ] `GltfHandler.Merge()` — non-overlapping node changes merge cleanly
+- [x] `GltfHandler.Merge()` — non-overlapping node changes merge cleanly
 
 ### M3 — Conflict UX
 - [ ] Define conflict marker format for non-text formats
