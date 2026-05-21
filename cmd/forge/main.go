@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/yakupatahanov/forge/internal/gitrepo"
 	"github.com/yakupatahanov/forge/internal/handler"
+	"github.com/yakupatahanov/forge/internal/handler/domain"
 	"github.com/yakupatahanov/forge/internal/handler/text"
 	"github.com/yakupatahanov/forge/internal/manifest"
 )
@@ -45,11 +46,14 @@ func rootCmd() *cobra.Command {
 	return root
 }
 
-// defaultRegistry builds the handler registry with official handlers.
-// Handlers are registered most-specific first; TextHandler is the catch-all.
+// defaultRegistry builds the handler registry with official domains and handlers.
+// Domains are checked before the TextHandler catch-all.
+// Within each domain, specific handlers are registered most-specific first.
 func defaultRegistry() *handler.Registry {
 	reg := handler.NewRegistry()
-	reg.Register(text.New())
+	reg.Register(domain.NewThreeD())
+	reg.Register(domain.NewImage())
+	reg.Register(text.New()) // catch-all — must be last
 	return reg
 }
 
@@ -82,12 +86,16 @@ func runInit(_ *cobra.Command, args []string) error {
 	handlersPath := filepath.Join(forgeDir, "handlers")
 	if _, err := os.Stat(handlersPath); os.IsNotExist(err) {
 		template := "# .forge/handlers\n" +
-			"# Declare community handlers required by this repository.\n" +
-			"# Forge will report these as missing after forge clone.\n" +
+			"# Declare which domains this repository requires.\n" +
+			"# Official domains (3d, image, text, audio, video) ship with Forge.\n" +
+			"# Community domains need a registry entry.\n" +
 			"#\n" +
-			"# Example:\n" +
-			"# [require]\n" +
-			"# \"*.blend\" = { registry = \"https://handlers.blendercommunity.org\", handler = \"blender/blend-handler\", version = \"1.2.0\" }\n"
+			"# [domains]\n" +
+			"# require = [\"3d\", \"image\"]\n" +
+			"#\n" +
+			"# [community.audio]\n" +
+			"# registry = \"https://forge-audio.example.com\"\n" +
+			"# version  = \"1.0.0\"\n"
 		if err := os.WriteFile(handlersPath, []byte(template), 0644); err != nil {
 			return fmt.Errorf("creating .forge/handlers: %w", err)
 		}
@@ -151,40 +159,34 @@ func runStatus(_ *cobra.Command, _ []string) error {
 }
 
 // handlerLabel returns a coloured handler annotation for a file path.
+// Format:
+//
+//	[3d › gltf]   — domain + specific handler
+//	[3d]          — domain fallback (no specific handler installed)
+//	[text]        — standalone catch-all
 func handlerLabel(path string, reg *handler.Registry) string {
-	h, err := reg.Resolve(path)
+	dom, h, err := reg.ResolveFull(path)
 	if err != nil {
-		return "\x1b[31m[no handler — forge handler install]\x1b[0m"
+		return "\x1b[31m[no handler]\x1b[0m"
 	}
 
+	handlerName := ""
 	if n, ok := h.(handler.Namer); ok {
-		name := n.Format()
-		// TextHandler is the catch-all. Flag binary-looking files so the user
-		// knows a dedicated handler would give a better diff.
-		if name == "text" && looksLikeBinary(path) {
-			return "\x1b[33m[no dedicated handler — binary diff only]\x1b[0m"
-		}
-		return fmt.Sprintf("\x1b[36m[%s]\x1b[0m", name)
+		handlerName = n.Format()
 	}
 
-	return "\x1b[36m[handler]\x1b[0m"
-}
+	if dom != nil {
+		domName := dom.Format()
+		if h == handler.ForgeHandler(dom) {
+			// Domain fallback — no specific handler installed yet.
+			return fmt.Sprintf("\x1b[33m[%s]\x1b[0m", domName)
+		}
+		// Specific handler within a domain.
+		return fmt.Sprintf("\x1b[36m[%s › %s]\x1b[0m", domName, handlerName)
+	}
 
-// looksLikeBinary returns true for file extensions that are typically binary
-// and would benefit from a dedicated handler.
-var binaryExtensions = map[string]bool{
-	".glb": true, ".gltf": true, ".fbx": true, ".obj": true, ".blend": true,
-	".usd": true, ".usda": true, ".usdc": true, ".usdz": true,
-	".psd": true, ".psb": true, ".xcf": true,
-	".png": true, ".jpg": true, ".jpeg": true, ".tiff": true, ".exr": true, ".hdr": true, ".tga": true,
-	".mp3": true, ".wav": true, ".ogg": true, ".flac": true,
-	".mp4": true, ".mov": true, ".avi": true, ".mkv": true,
-	".zip": true, ".tar": true, ".gz": true, ".7z": true,
-	".pdf": true, ".ptex": true, ".hip": true,
-}
-
-func looksLikeBinary(path string) bool {
-	return binaryExtensions[strings.ToLower(filepath.Ext(path))]
+	// Standalone handler (e.g. TextHandler).
+	return fmt.Sprintf("\x1b[36m[%s]\x1b[0m", handlerName)
 }
 
 // ── forge clone ───────────────────────────────────────────────────────────────
@@ -302,30 +304,36 @@ func defaultSSHKey() string {
 	return filepath.Join(home, ".ssh", "id_ed25519")
 }
 
-// reportMissingHandlers reads .forge/handlers and lists any requirements that
-// are not covered by the currently installed handler registry.
+// reportMissingHandlers reads .forge/handlers and reports any required domains
+// that are not covered by the currently installed registry.
 func reportMissingHandlers(repoDir string) {
 	m, err := manifest.LoadHandlers(repoDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "forge: warning: could not read .forge/handlers: %v\n", err)
 		return
 	}
-	if len(m.Require) == 0 {
-		return
-	}
 
 	reg := defaultRegistry()
+	installedDomains := map[string]bool{}
+	for _, d := range reg.Domains() {
+		installedDomains[d.Format()] = true
+	}
 
-	// Collect patterns whose only match is the TextHandler catch-all — meaning
-	// no dedicated handler is installed for them.
 	var missing []string
-	for pattern, req := range m.Require {
-		sample := patternToSample(pattern)
-		h, err := reg.Resolve(sample)
-		if err != nil || isTextFallback(h) {
+
+	// Official domains listed in [domains] require = [...]
+	for _, name := range m.Domains.Require {
+		if !installedDomains[name] {
+			missing = append(missing, fmt.Sprintf("  %-10s  (official)  forge domain install %s", name, name))
+		}
+	}
+
+	// Community domains listed in [community]
+	for name, src := range m.Community {
+		if !installedDomains[name] {
 			missing = append(missing, fmt.Sprintf(
-				"  %-20s  %s@%s\n                         install from: %s",
-				pattern, req.Handler, req.Version, req.Registry,
+				"  %-10s  %s@%s\n              forge domain install %s --registry %s",
+				name, name, src.Version, name, src.Registry,
 			))
 		}
 	}
@@ -336,25 +344,12 @@ func reportMissingHandlers(repoDir string) {
 
 	sort.Strings(missing)
 	fmt.Println()
-	fmt.Println("This repository requires handlers that are not installed:")
+	fmt.Println("This repository requires domains that are not installed:")
 	for _, m := range missing {
 		fmt.Println(m)
 	}
 	fmt.Println()
-	fmt.Println("Run `forge handler install` to install them.  (available in M4)")
-}
-
-// patternToSample turns a glob like "*.blend" into "file.blend" so the
-// registry can attempt to resolve it.
-func patternToSample(pattern string) string {
-	return strings.NewReplacer("*", "file", "?", "x").Replace(pattern)
-}
-
-// isTextFallback returns true if h is the catch-all TextHandler, meaning no
-// dedicated handler was found for the pattern.
-func isTextFallback(h handler.ForgeHandler) bool {
-	_, ok := h.(*text.Handler)
-	return ok
+	fmt.Println("(forge domain install is available in M4)")
 }
 
 // repoNameFromURL derives a local directory name from a clone URL.
