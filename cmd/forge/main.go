@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -31,7 +32,9 @@ func rootCmd() *cobra.Command {
 		Long:  "Forge is a format-aware version control system with semantic diff and merge for any file type.",
 	}
 	root.AddCommand(
+		initCmd(),
 		cloneCmd(),
+		statusCmd(),
 		diffCmd(),
 		mergeCmd(),
 		mergeFileCmd(),
@@ -48,6 +51,140 @@ func defaultRegistry() *handler.Registry {
 	reg := handler.NewRegistry()
 	reg.Register(text.New())
 	return reg
+}
+
+// ── forge init ────────────────────────────────────────────────────────────────
+
+func initCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "init [directory]",
+		Short: "Create a new Forge repository",
+		Args:  cobra.MaximumNArgs(1),
+		RunE:  runInit,
+	}
+}
+
+func runInit(_ *cobra.Command, args []string) error {
+	dir := "."
+	if len(args) == 1 {
+		dir = args[0]
+	}
+
+	if _, err := gogit.PlainInit(dir, false); err != nil && !errors.Is(err, gogit.ErrRepositoryAlreadyExists) {
+		return fmt.Errorf("init failed: %w", err)
+	}
+
+	forgeDir := filepath.Join(dir, ".forge")
+	if err := os.MkdirAll(forgeDir, 0755); err != nil {
+		return fmt.Errorf("creating .forge/: %w", err)
+	}
+
+	handlersPath := filepath.Join(forgeDir, "handlers")
+	if _, err := os.Stat(handlersPath); os.IsNotExist(err) {
+		template := "# .forge/handlers\n" +
+			"# Declare community handlers required by this repository.\n" +
+			"# Forge will report these as missing after forge clone.\n" +
+			"#\n" +
+			"# Example:\n" +
+			"# [require]\n" +
+			"# \"*.blend\" = { registry = \"https://handlers.blendercommunity.org\", handler = \"blender/blend-handler\", version = \"1.2.0\" }\n"
+		if err := os.WriteFile(handlersPath, []byte(template), 0644); err != nil {
+			return fmt.Errorf("creating .forge/handlers: %w", err)
+		}
+	}
+
+	abs, _ := filepath.Abs(dir)
+	fmt.Printf("Initialized Forge repository in %s\n", abs)
+	return nil
+}
+
+// ── forge status ──────────────────────────────────────────────────────────────
+
+func statusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show working tree status with handler annotations",
+		RunE:  runStatus,
+	}
+}
+
+func runStatus(_ *cobra.Command, _ []string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+
+	r, err := gogit.PlainOpenWithOptions(cwd, &gogit.PlainOpenOptions{DetectDotGit: true})
+	if err != nil {
+		return fmt.Errorf("not a git repository")
+	}
+
+	wt, err := r.Worktree()
+	if err != nil {
+		return err
+	}
+
+	st, err := wt.Status()
+	if err != nil {
+		return err
+	}
+
+	if st.IsClean() {
+		fmt.Println("nothing to commit, working tree clean")
+		return nil
+	}
+
+	reg := defaultRegistry()
+
+	paths := make([]string, 0, len(st))
+	for p := range st {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+
+	for _, p := range paths {
+		fs := st[p]
+		label := handlerLabel(p, reg)
+		fmt.Printf("%c%c  %-45s %s\n", rune(fs.Staging), rune(fs.Worktree), p, label)
+	}
+	return nil
+}
+
+// handlerLabel returns a coloured handler annotation for a file path.
+func handlerLabel(path string, reg *handler.Registry) string {
+	h, err := reg.Resolve(path)
+	if err != nil {
+		return "\x1b[31m[no handler — forge handler install]\x1b[0m"
+	}
+
+	if n, ok := h.(handler.Namer); ok {
+		name := n.Format()
+		// TextHandler is the catch-all. Flag binary-looking files so the user
+		// knows a dedicated handler would give a better diff.
+		if name == "text" && looksLikeBinary(path) {
+			return "\x1b[33m[no dedicated handler — binary diff only]\x1b[0m"
+		}
+		return fmt.Sprintf("\x1b[36m[%s]\x1b[0m", name)
+	}
+
+	return "\x1b[36m[handler]\x1b[0m"
+}
+
+// looksLikeBinary returns true for file extensions that are typically binary
+// and would benefit from a dedicated handler.
+var binaryExtensions = map[string]bool{
+	".glb": true, ".gltf": true, ".fbx": true, ".obj": true, ".blend": true,
+	".usd": true, ".usda": true, ".usdc": true, ".usdz": true,
+	".psd": true, ".psb": true, ".xcf": true,
+	".png": true, ".jpg": true, ".jpeg": true, ".tiff": true, ".exr": true, ".hdr": true, ".tga": true,
+	".mp3": true, ".wav": true, ".ogg": true, ".flac": true,
+	".mp4": true, ".mov": true, ".avi": true, ".mkv": true,
+	".zip": true, ".tar": true, ".gz": true, ".7z": true,
+	".pdf": true, ".ptex": true, ".hip": true,
+}
+
+func looksLikeBinary(path string) bool {
+	return binaryExtensions[strings.ToLower(filepath.Ext(path))]
 }
 
 // ── forge clone ───────────────────────────────────────────────────────────────
