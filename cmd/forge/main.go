@@ -562,8 +562,9 @@ func mergeToolCmd() *cobra.Command {
 		Short: "Resolve merge conflicts using the format-appropriate tool",
 		Long: `Opens each conflicted file in a resolution tool and checks the result.
 
-For text files: opens in $MERGE_TOOL, $VISUAL, $EDITOR, or vi (same
-fallback chain as git mergetool). Conflict is resolved when all
+For text files: opens in $MERGE_TOOL, $VISUAL, $EDITOR, or the first
+available tool from git's built-in list (meld, vimdiff, vim, vi…).
+Conflict is resolved when all
 <<<<<<< markers have been removed.
 
 For binary formats (.glb, .gltf): prints the semantic conflict paths
@@ -713,12 +714,25 @@ func promptResolved(path string) bool {
 	return strings.ToLower(strings.TrimSpace(answer)) == "y"
 }
 
-// resolveMergeTool returns the merge tool to use, following the same env-var
-// precedence as git: MERGE_TOOL → GIT_MERGETOOL → VISUAL → EDITOR → vi.
+// resolveMergeTool returns the merge tool to use.
+// Precedence: MERGE_TOOL → GIT_MERGETOOL → VISUAL → EDITOR →
+// first available tool from git's built-in auto-detection list → "vi".
 func resolveMergeTool() string {
 	for _, env := range []string{"MERGE_TOOL", "GIT_MERGETOOL", "VISUAL", "EDITOR"} {
 		if v := os.Getenv(env); v != "" {
 			return v
+		}
+	}
+	// Mirror git's built-in auto-detection order.
+	builtins := []string{
+		"meld", "opendiff", "kdiff3", "tkdiff", "xxdiff",
+		"tortoisemerge", "gvimdiff", "diffuse", "diffmerge",
+		"ecmerge", "p4merge", "araxis", "bc", "codecompare",
+		"smerge", "emerge", "nvimdiff", "nvim", "vimdiff", "vim", "vi",
+	}
+	for _, t := range builtins {
+		if _, err := exec.LookPath(t); err == nil {
+			return t
 		}
 	}
 	return "vi"
