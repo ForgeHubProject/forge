@@ -402,6 +402,133 @@ func setRoughness(m *gltf.Material, v float64) {
 	m.PBRMetallicRoughness.RoughnessFactor = &v
 }
 
+// ── conflict resolution ───────────────────────────────────────────────────────
+
+// ApplyChoices implements handler.ConflictApplier.
+// merged already holds "ours" for every conflict; takePaths lists the conflict
+// paths where the user chose "incoming" (theirs). Those values are copied from
+// theirs into merged and the result is re-encoded as a valid glTF/GLB.
+func (h *Handler) ApplyChoices(merged, theirs handler.Blob, takePaths []string) (handler.Blob, error) {
+	if len(takePaths) == 0 {
+		return merged, nil
+	}
+	docM, err := parseDoc(merged)
+	if err != nil {
+		return nil, fmt.Errorf("parsing merged: %w", err)
+	}
+	docT, err := parseDoc(theirs)
+	if err != nil {
+		return nil, fmt.Errorf("parsing theirs: %w", err)
+	}
+	for _, path := range takePaths {
+		applyChoice(docM, docT, path)
+	}
+	return encodeBlob(docM, isGLB(merged))
+}
+
+// applyChoice copies the value at path from docT into docM.
+// path format: "nodes.Name[.property]" or "materials.Name[.property]"
+func applyChoice(docM, docT *gltf.Document, path string) {
+	parts := strings.SplitN(path, ".", 3)
+	if len(parts) < 2 {
+		return
+	}
+	name := parts[1]
+
+	switch parts[0] {
+	case "nodes":
+		tn := nodeByName(docT.Nodes, name)
+		mn := nodeByName(docM.Nodes, name)
+		if len(parts) == 2 {
+			if tn != nil && mn == nil {
+				docM.Nodes = append(docM.Nodes, tn) // ours removed, theirs kept → add
+			} else if tn == nil && mn != nil {
+				docM.Nodes = removeNode(docM.Nodes, name) // theirs removed, ours kept → remove
+			}
+			return
+		}
+		if mn == nil || tn == nil {
+			return
+		}
+		switch parts[2] {
+		case "translation":
+			mn.Translation = tn.TranslationOrDefault()
+		case "rotation":
+			mn.Rotation = tn.RotationOrDefault()
+		case "scale":
+			mn.Scale = tn.ScaleOrDefault()
+		case "mesh":
+			mn.Mesh = tn.Mesh
+		}
+
+	case "materials":
+		tm := materialByName(docT.Materials, name)
+		mm := materialByName(docM.Materials, name)
+		if len(parts) == 2 {
+			if tm != nil && mm == nil {
+				docM.Materials = append(docM.Materials, tm)
+			} else if tm == nil && mm != nil {
+				docM.Materials = removeMaterial(docM.Materials, name)
+			}
+			return
+		}
+		if mm == nil || tm == nil {
+			return
+		}
+		tPBR := pbrOrDefault(tm)
+		switch parts[2] {
+		case "baseColorFactor":
+			setBaseColor(mm, tPBR.BaseColorFactorOrDefault())
+		case "metallicFactor":
+			setMetallic(mm, tPBR.MetallicFactorOrDefault())
+		case "roughnessFactor":
+			setRoughness(mm, tPBR.RoughnessFactorOrDefault())
+		case "alphaMode":
+			mm.AlphaMode = tm.AlphaMode
+		case "doubleSided":
+			mm.DoubleSided = tm.DoubleSided
+		}
+	}
+}
+
+func nodeByName(nodes []*gltf.Node, name string) *gltf.Node {
+	for i, n := range nodes {
+		if nodeName(n, i) == name {
+			return n
+		}
+	}
+	return nil
+}
+
+func removeNode(nodes []*gltf.Node, name string) []*gltf.Node {
+	out := nodes[:0:0]
+	for i, n := range nodes {
+		if nodeName(n, i) != name {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+func materialByName(mats []*gltf.Material, name string) *gltf.Material {
+	for i, m := range mats {
+		if materialName(m, i) == name {
+			return m
+		}
+	}
+	return nil
+}
+
+func removeMaterial(mats []*gltf.Material, name string) []*gltf.Material {
+	out := mats[:0:0]
+	for i, m := range mats {
+		if materialName(m, i) != name {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // ── serialisation ─────────────────────────────────────────────────────────────
 
 // isGLB returns true if the blob starts with the GLB magic bytes ("glTF").

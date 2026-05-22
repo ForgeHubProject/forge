@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -609,9 +611,7 @@ func runMergeTool(_ *cobra.Command, args []string) error {
 		isBinary := h != nil && isBinaryHandler(h)
 
 		if isBinary {
-			resolveBinaryConflict(f)
-			// For binary formats the user resolves externally; ask for confirmation.
-			if promptResolved(f) {
+			if resolveInteractive(f, h) {
 				resolved++
 			}
 			continue
@@ -691,27 +691,134 @@ func isBinaryHandler(h handler.ForgeHandler) bool {
 	return false
 }
 
-// resolveBinaryConflict prints the conflict paths for a binary file so the
-// user knows what to fix in their DCC tool before re-exporting.
-func resolveBinaryConflict(path string) {
-	// Look for a sidecar conflict file written by forge merge-file.
-	sidecar := path + ".forge-conflict"
-	data, err := os.ReadFile(sidecar)
-	if err == nil && len(data) > 0 {
-		fmt.Printf("Conflicts in %s:\n%s\n", path, data)
-		fmt.Printf("Resolve in your DCC tool (Blender, etc.), re-export to %s,\nthen delete %s and run 'git add %s'.\n", path, sidecar, path)
-	} else {
-		fmt.Printf("%s is a binary format — resolve by re-exporting from your DCC tool.\n", path)
-		fmt.Printf("Run 'git add %s' once the file is ready.\n", path)
+// resolveInteractive drives the conflict-by-conflict prompt for binary formats.
+// Returns true when the file is fully resolved and written back.
+func resolveInteractive(path string, h handler.ForgeHandler) bool {
+	sidecarPath := path + ".forge-conflict"
+	raw, err := os.ReadFile(sidecarPath)
+	if err != nil {
+		// No sidecar — handler didn't write one (domain fallback, etc.)
+		fmt.Printf("%s: binary conflict — resolve in your DCC tool and re-export.\n", path)
+		fmt.Printf("Run 'git add %s' once ready.\n", path)
+		return promptConfirm(fmt.Sprintf("Mark %s as resolved?", path))
+	}
+
+	var sc handler.ConflictSidecar
+	if err := json.Unmarshal(raw, &sc); err != nil {
+		fmt.Fprintf(os.Stderr, "forge: malformed sidecar for %s: %v\n", path, err)
+		return false
+	}
+
+	applier, canApply := h.(handler.ConflictApplier)
+	if !canApply {
+		// Handler exists but doesn't support ApplyChoices — print and ask to confirm.
+		fmt.Printf("Conflicts in %s:\n", path)
+		for _, c := range sc.Conflicts {
+			fmt.Printf("  %s\n    current:  %v\n    incoming: %v\n", c.Path, c.Ours, c.Theirs)
+		}
+		fmt.Printf("Resolve in your DCC tool and re-export, then 'git add %s'.\n", path)
+		return promptConfirm(fmt.Sprintf("Mark %s as resolved?", path))
+	}
+
+	n := len(sc.Conflicts)
+	// choices[i] == true → take theirs (incoming); false → keep ours (current, the default)
+	choices := make([]bool, n)
+	idx := 0
+
+	for {
+		c := sc.Conflicts[idx]
+		dot := func(want bool) string {
+			if choices[idx] == want {
+				return "●"
+			}
+			return " "
+		}
+		fmt.Printf("\n%s  ─  %d conflict(s)   [%d/%d]\n", path, n, idx+1, n)
+		fmt.Printf("  path:     %s\n", c.Path)
+		fmt.Printf("  ──────────────────────────────────────────\n")
+		fmt.Printf("  [c] %s current   %v\n", dot(false), c.Ours)
+		fmt.Printf("  [i] %s incoming  %v\n", dot(true), c.Theirs)
+		fmt.Printf("\n  c/i = pick · n = next · p = prev · a = apply · q = quit\n")
+		fmt.Printf("  > ")
+
+		var input string
+		fmt.Scanln(&input)
+		switch strings.ToLower(strings.TrimSpace(input)) {
+		case "c":
+			choices[idx] = false
+			if idx < n-1 {
+				idx++
+			}
+		case "i":
+			choices[idx] = true
+			if idx < n-1 {
+				idx++
+			}
+		case "n":
+			if idx < n-1 {
+				idx++
+			}
+		case "p":
+			if idx > 0 {
+				idx--
+			}
+		case "a":
+			return applyConflictChoices(path, sidecarPath, sc, choices, applier)
+		case "q":
+			fmt.Println("Aborted — no changes made.")
+			return false
+		}
 	}
 }
 
-// promptResolved asks the user whether they have resolved a binary conflict.
-func promptResolved(path string) bool {
-	fmt.Printf("Mark %s as resolved? [y/N] ", path)
+// applyConflictChoices prints a summary, asks for confirmation, then patches
+// the merged file and removes the sidecar.
+func applyConflictChoices(path, sidecarPath string, sc handler.ConflictSidecar, choices []bool, applier handler.ConflictApplier) bool {
+	fmt.Printf("\nSummary for %s:\n", path)
+	var takePaths []string
+	for i, c := range sc.Conflicts {
+		label, val := "current ", c.Ours
+		if choices[i] {
+			label, val = "incoming", c.Theirs
+			takePaths = append(takePaths, c.Path)
+		}
+		fmt.Printf("  [%d/%d]  %-45s → %s  %v\n", i+1, len(sc.Conflicts), c.Path, label, val)
+	}
+	if !promptConfirm("Apply these choices?") {
+		fmt.Println("Aborted — no changes made.")
+		return false
+	}
+
+	theirsBlob, err := base64.StdEncoding.DecodeString(sc.TheirsB64)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "forge: could not decode theirs blob: %v\n", err)
+		return false
+	}
+	merged, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "forge: could not read %s: %v\n", path, err)
+		return false
+	}
+	result, err := applier.ApplyChoices(merged, theirsBlob, takePaths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "forge: ApplyChoices failed: %v\n", err)
+		return false
+	}
+	if err := os.WriteFile(path, result, 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "forge: could not write %s: %v\n", path, err)
+		return false
+	}
+	_ = os.Remove(sidecarPath)
+	fmt.Printf("%s: resolved.\n", path)
+	return true
+}
+
+func promptConfirm(prompt string) bool {
+	fmt.Printf("%s [Y/n] ", prompt)
 	var answer string
 	fmt.Scanln(&answer)
-	return strings.ToLower(strings.TrimSpace(answer)) == "y"
+	a := strings.ToLower(strings.TrimSpace(answer))
+	return a == "" || a == "y"
 }
 
 // resolveMergeTool returns the merge tool to use.
@@ -823,6 +930,20 @@ func runMergeFile(_ *cobra.Command, args []string) error {
 	}
 
 	if ci != nil && len(ci.Conflicts) > 0 {
+		// Write structured sidecar so forge mergetool can drive interactive resolution.
+		format := "unknown"
+		if n, ok := h.(interface{ Format() string }); ok {
+			format = n.Format()
+		}
+		sidecar := handler.ConflictSidecar{
+			Handler:   format,
+			Conflicts: ci.Conflicts,
+			TheirsB64: base64.StdEncoding.EncodeToString(theirs),
+		}
+		if data, err := json.MarshalIndent(sidecar, "", "  "); err == nil {
+			_ = os.WriteFile(oursPath+".forge-conflict", data, 0644)
+		}
+
 		fmt.Fprintf(os.Stderr, "CONFLICT: %d conflict(s) in %s\n", len(ci.Conflicts), oursPath)
 		for _, c := range ci.Conflicts {
 			fmt.Fprintf(os.Stderr, "  %s\n", c.Path)
