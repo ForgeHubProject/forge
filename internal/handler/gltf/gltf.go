@@ -171,7 +171,7 @@ func merge3Node(bn, on, tn *gltf.Node, name string, conflicts *[]handler.Semanti
 		} else {
 			*conflicts = append(*conflicts, handler.SemanticConflict{
 				Path: "nodes." + name + ".rotation",
-				Ours: fmtVec4(ourRot), Theirs: fmtVec4(theirRot),
+				Ours: fmtRot(ourRot), Theirs: fmtRot(theirRot),
 			})
 		}
 	} else if nearEq4(ourRot, baseRotQ) && !nearEq4(theirRot, baseRotQ) {
@@ -552,7 +552,7 @@ func diffNodeProps(a, b *gltf.Node) []handler.DiffChange {
 	if ra, rb := a.RotationOrDefault(), b.RotationOrDefault(); !nearEq4(ra, rb) {
 		changes = append(changes, handler.DiffChange{
 			Path: "rotation", Label: "rotation",
-			Kind: handler.Modified, Before: fmtVec4(ra), After: fmtVec4(rb),
+			Kind: handler.Modified, Before: fmtRot(ra), After: fmtRot(rb),
 		})
 	}
 
@@ -885,6 +885,41 @@ func nearEq4(a, b [4]float64) bool {
 }
 
 // fmtF formats a float64 using float32 precision (matches GLB binary storage).
+
+// quatToEulerXYZ converts a glTF quaternion [x,y,z,w] to XYZ Euler angles in
+// degrees. Quaternions are orientation-only (no winding count), so a value like
+// "594°" from a DCC tool becomes its equivalent orientation in [-180°, 180°].
+func quatToEulerXYZ(q [4]float64) [3]float64 {
+	qx, qy, qz, qw := q[0], q[1], q[2], q[3]
+	const toDeg = 180.0 / math.Pi
+
+	// X (roll)
+	sinr := 2 * (qw*qx + qy*qz)
+	cosr := 1 - 2*(qx*qx+qy*qy)
+	x := math.Atan2(sinr, cosr) * toDeg
+
+	// Y (pitch) — clamp to avoid NaN at poles
+	sinp := 2 * (qw*qy - qz*qx)
+	if sinp > 1 {
+		sinp = 1
+	} else if sinp < -1 {
+		sinp = -1
+	}
+	y := math.Asin(sinp) * toDeg
+
+	// Z (yaw)
+	siny := 2 * (qw*qz + qx*qy)
+	cosy := 1 - 2*(qy*qy+qz*qz)
+	z := math.Atan2(siny, cosy) * toDeg
+
+	return [3]float64{x, y, z}
+}
+
+// fmtRot formats a quaternion as human-readable XYZ Euler degrees.
+func fmtRot(q [4]float64) string {
+	e := quatToEulerXYZ(q)
+	return fmt.Sprintf("(%s° %s° %s°)", fmtF(e[0]), fmtF(e[1]), fmtF(e[2]))
+}
 func fmtF(v float64) string {
 	return strconv.FormatFloat(v, 'f', -1, 32)
 }
