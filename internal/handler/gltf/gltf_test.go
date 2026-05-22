@@ -240,3 +240,85 @@ func TestMerge_IdenticalFiles_Clean(t *testing.T) {
 		t.Errorf("expected no conflicts for identical merge, got: %v", ci.Conflicts)
 	}
 }
+
+// ── ApplyChoices tests ────────────────────────────────────────────────────────
+
+func TestApplyChoices_TakeTheirsTranslation(t *testing.T) {
+	base := minDoc([]any{node("Cube", []float64{0, 0, 0})}, nil)
+	ours := minDoc([]any{node("Cube", []float64{0, 1.0, 0})}, nil)
+	theirs := minDoc([]any{node("Cube", []float64{0, 2.0, 0})}, nil)
+
+	h := New()
+	merged, ci, err := h.Merge(base, ours, theirs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ci == nil || len(ci.Conflicts) == 0 {
+		t.Fatal("expected conflict")
+	}
+
+	// User picks incoming (theirs) for the translation conflict.
+	result, err := h.ApplyChoices(merged, theirs, []string{"nodes.Cube.translation"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := parseDoc(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := doc.Nodes[0].TranslationOrDefault()
+	if !nearEq(tr[1], 2.0) {
+		t.Errorf("expected y=2.0 (theirs), got %v", tr[1])
+	}
+}
+
+func TestApplyChoices_KeepOurs_NoChange(t *testing.T) {
+	base := minDoc([]any{node("Cube", []float64{0, 0, 0})}, nil)
+	ours := minDoc([]any{node("Cube", []float64{0, 1.0, 0})}, nil)
+	theirs := minDoc([]any{node("Cube", []float64{0, 2.0, 0})}, nil)
+
+	h := New()
+	merged, _, err := h.Merge(base, ours, theirs)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// User picks current (ours) for everything — no takePaths.
+	result, err := h.ApplyChoices(merged, theirs, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := parseDoc(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := doc.Nodes[0].TranslationOrDefault()
+	if !nearEq(tr[1], 1.0) {
+		t.Errorf("expected y=1.0 (ours), got %v", tr[1])
+	}
+}
+
+func TestApplyChoices_TakeTheirsRemovedNode(t *testing.T) {
+	// Ours kept Lamp; theirs removed it. User picks theirs (remove).
+	base := minDoc([]any{node("Cube", nil), node("Lamp", nil)}, nil)
+	ours := minDoc([]any{node("Cube", nil), node("Lamp", nil)}, nil)
+	theirs := minDoc([]any{node("Cube", nil)}, nil)
+
+	h := New()
+	merged, ci, err := h.Merge(base, ours, theirs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ci == nil {
+		t.Fatal("expected conflict")
+	}
+
+	result, err := h.ApplyChoices(merged, theirs, []string{"nodes.Lamp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, _ := parseDoc(result)
+	if len(doc.Nodes) != 1 {
+		t.Errorf("expected 1 node after removing Lamp, got %d", len(doc.Nodes))
+	}
+}
