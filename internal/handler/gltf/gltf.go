@@ -30,9 +30,393 @@ func (h *Handler) Match(path string) bool {
 	return ext == ".gltf" || ext == ".glb"
 }
 
-// Merge is not yet supported for glTF.
-func (h *Handler) Merge(_, _, _ handler.Blob) (handler.Blob, *handler.ConflictInfo, error) {
-	return nil, nil, handler.ErrNotSupported
+// Merge performs a 3-way semantic merge of glTF/GLB blobs.
+//
+// The algorithm mirrors what git does for text at the line level, but operates
+// on named scene-graph units instead:
+//
+//	only ours changed a property  → take ours  (already in result)
+//	only theirs changed a property → take theirs (applied to result)
+//	both changed to the same value → take either (no conflict)
+//	both changed to different values → keep ours, record conflict
+//
+// Added/removed elements follow the same logic at the element level.
+// The merged output is always a valid glTF/GLB; conflicts are reported in
+// ConflictInfo and the caller (forge merge-file) exits 1, matching git behaviour.
+func (h *Handler) Merge(base, ours, theirs handler.Blob) (handler.Blob, *handler.ConflictInfo, error) {
+	docBase, err := parseDoc(base)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parsing base: %w", err)
+	}
+	docOurs, err := parseDoc(ours)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parsing ours: %w", err)
+	}
+	docTheirs, err := parseDoc(theirs)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parsing theirs: %w", err)
+	}
+
+	var conflicts []handler.SemanticConflict
+
+	docOurs.Nodes = mergeNodeList(docBase.Nodes, docOurs.Nodes, docTheirs.Nodes, &conflicts)
+	docOurs.Materials = mergeMaterialList(docBase.Materials, docOurs.Materials, docTheirs.Materials, &conflicts)
+
+	result, err := encodeBlob(docOurs, isGLB(ours))
+	if err != nil {
+		return nil, nil, fmt.Errorf("encoding merged glTF: %w", err)
+	}
+
+	var ci *handler.ConflictInfo
+	if len(conflicts) > 0 {
+		ci = &handler.ConflictInfo{Conflicts: conflicts}
+	}
+	return result, ci, nil
+}
+
+// ── merge: nodes ──────────────────────────────────────────────────────────────
+
+func mergeNodeList(base, ours, theirs []*gltf.Node, conflicts *[]handler.SemanticConflict) []*gltf.Node {
+	baseMap, _ := nodeMap(base)
+	oursMap, _ := nodeMap(ours)
+	theirsMap, theirsOrder := nodeMap(theirs)
+
+	// Walk ours order first, then append anything only theirs added.
+	seen := make(map[string]bool)
+	var names []string
+	for i, n := range ours {
+		k := nodeName(n, i)
+		names = append(names, k)
+		seen[k] = true
+	}
+	for i, n := range theirs {
+		k := nodeName(n, i)
+		if !seen[k] {
+			names = append(names, k)
+			seen[k] = true
+		}
+	}
+	_ = theirsOrder
+
+	var result []*gltf.Node
+	for _, name := range names {
+		bn := baseMap[name]   // nil if newly added by one side
+		on, inOurs := oursMap[name]
+		tn, inTheirs := theirsMap[name]
+
+		switch {
+		case inOurs && inTheirs:
+			result = append(result, merge3Node(bn, on, tn, name, conflicts))
+
+		case inOurs && !inTheirs:
+			if bn != nil {
+				// theirs removed it, ours kept it → conflict, keep ours
+				*conflicts = append(*conflicts, handler.SemanticConflict{
+					Path: "nodes." + name, Ours: "kept", Theirs: "removed",
+				})
+			}
+			// !bn: only ours added → include
+			result = append(result, on)
+
+		case !inOurs && inTheirs:
+			if bn != nil {
+				// ours removed it, theirs kept it → conflict, ours wins (omit)
+				*conflicts = append(*conflicts, handler.SemanticConflict{
+					Path: "nodes." + name, Ours: "removed", Theirs: "kept",
+				})
+			} else {
+				// only theirs added → include
+				result = append(result, tn)
+			}
+		// !inOurs && !inTheirs: both removed → omit
+		}
+	}
+	return result
+}
+
+// merge3Node merges a single node's properties 3-way.
+// bn may be nil when both sides added a node with the same name.
+func merge3Node(bn, on, tn *gltf.Node, name string, conflicts *[]handler.SemanticConflict) *gltf.Node {
+	out := cloneNode(on)
+
+	var baseTr, baseSc [3]float64
+	var baseRotQ [4]float64
+	if bn != nil {
+		baseTr = bn.TranslationOrDefault()
+		baseRotQ = bn.RotationOrDefault()
+		baseSc = bn.ScaleOrDefault()
+	} else {
+		baseRotQ = gltf.DefaultRotation
+		baseSc = gltf.DefaultScale
+	}
+
+	ourTr, theirTr := on.TranslationOrDefault(), tn.TranslationOrDefault()
+	if !nearEq3(ourTr, baseTr) && !nearEq3(theirTr, baseTr) {
+		if nearEq3(ourTr, theirTr) {
+			out.Translation = ourTr
+		} else {
+			*conflicts = append(*conflicts, handler.SemanticConflict{
+				Path: "nodes." + name + ".translation",
+				Ours: fmtVec3(ourTr), Theirs: fmtVec3(theirTr),
+			})
+		}
+	} else if nearEq3(ourTr, baseTr) && !nearEq3(theirTr, baseTr) {
+		out.Translation = theirTr
+	}
+
+	ourRot, theirRot := on.RotationOrDefault(), tn.RotationOrDefault()
+	if !nearEq4(ourRot, baseRotQ) && !nearEq4(theirRot, baseRotQ) {
+		if nearEq4(ourRot, theirRot) {
+			out.Rotation = ourRot
+		} else {
+			*conflicts = append(*conflicts, handler.SemanticConflict{
+				Path: "nodes." + name + ".rotation",
+				Ours: fmtRot(ourRot), Theirs: fmtRot(theirRot),
+			})
+		}
+	} else if nearEq4(ourRot, baseRotQ) && !nearEq4(theirRot, baseRotQ) {
+		out.Rotation = theirRot
+	}
+
+	ourSc, theirSc := on.ScaleOrDefault(), tn.ScaleOrDefault()
+	if !nearEq3(ourSc, baseSc) && !nearEq3(theirSc, baseSc) {
+		if nearEq3(ourSc, theirSc) {
+			out.Scale = ourSc
+		} else {
+			*conflicts = append(*conflicts, handler.SemanticConflict{
+				Path: "nodes." + name + ".scale",
+				Ours: fmtVec3(ourSc), Theirs: fmtVec3(theirSc),
+			})
+		}
+	} else if nearEq3(ourSc, baseSc) && !nearEq3(theirSc, baseSc) {
+		out.Scale = theirSc
+	}
+
+	// Mesh reference
+	baseMesh := ptrLabel(func() *int {
+		if bn != nil {
+			return bn.Mesh
+		}
+		return nil
+	}(), "mesh")
+	ourMesh, theirMesh := ptrLabel(on.Mesh, "mesh"), ptrLabel(tn.Mesh, "mesh")
+	if ourMesh == baseMesh && theirMesh != baseMesh {
+		out.Mesh = tn.Mesh
+	} else if ourMesh != baseMesh && theirMesh != baseMesh && ourMesh != theirMesh {
+		*conflicts = append(*conflicts, handler.SemanticConflict{
+			Path: "nodes." + name + ".mesh",
+			Ours: ourMesh, Theirs: theirMesh,
+		})
+	}
+
+	return out
+}
+
+func cloneNode(n *gltf.Node) *gltf.Node {
+	c := *n
+	if n.Mesh != nil {
+		m := *n.Mesh
+		c.Mesh = &m
+	}
+	if n.Skin != nil {
+		s := *n.Skin
+		c.Skin = &s
+	}
+	if len(n.Children) > 0 {
+		c.Children = make([]int, len(n.Children))
+		copy(c.Children, n.Children)
+	}
+	return &c
+}
+
+// ── merge: materials ──────────────────────────────────────────────────────────
+
+func mergeMaterialList(base, ours, theirs []*gltf.Material, conflicts *[]handler.SemanticConflict) []*gltf.Material {
+	baseMap, _ := materialMap(base)
+	oursMap, _ := materialMap(ours)
+	theirsMap, _ := materialMap(theirs)
+
+	seen := make(map[string]bool)
+	var names []string
+	for i, m := range ours {
+		k := materialName(m, i)
+		names = append(names, k)
+		seen[k] = true
+	}
+	for i, m := range theirs {
+		k := materialName(m, i)
+		if !seen[k] {
+			names = append(names, k)
+			seen[k] = true
+		}
+	}
+
+	var result []*gltf.Material
+	for _, name := range names {
+		bm := baseMap[name]
+		om, inOurs := oursMap[name]
+		tm, inTheirs := theirsMap[name]
+
+		switch {
+		case inOurs && inTheirs:
+			result = append(result, merge3Material(bm, om, tm, name, conflicts))
+		case inOurs && !inTheirs:
+			if bm != nil {
+				*conflicts = append(*conflicts, handler.SemanticConflict{
+					Path: "materials." + name, Ours: "kept", Theirs: "removed",
+				})
+			}
+			result = append(result, om)
+		case !inOurs && inTheirs:
+			if bm != nil {
+				*conflicts = append(*conflicts, handler.SemanticConflict{
+					Path: "materials." + name, Ours: "removed", Theirs: "kept",
+				})
+			} else {
+				result = append(result, tm)
+			}
+		}
+	}
+	return result
+}
+
+func merge3Material(bm, om, tm *gltf.Material, name string, conflicts *[]handler.SemanticConflict) *gltf.Material {
+	out := cloneMaterial(om)
+
+	bPBR := pbrOrDefault(func() *gltf.Material {
+		if bm != nil {
+			return bm
+		}
+		return &gltf.Material{}
+	}())
+	oPBR := pbrOrDefault(om)
+	tPBR := pbrOrDefault(tm)
+
+	// baseColorFactor
+	baseBC := bPBR.BaseColorFactorOrDefault()
+	ourBC, theirBC := oPBR.BaseColorFactorOrDefault(), tPBR.BaseColorFactorOrDefault()
+	if ourBC == baseBC && theirBC != baseBC {
+		setBaseColor(out, theirBC)
+	} else if ourBC != baseBC && theirBC != baseBC && ourBC != theirBC {
+		*conflicts = append(*conflicts, handler.SemanticConflict{
+			Path: "materials." + name + ".baseColorFactor",
+			Ours: fmtVec4(ourBC), Theirs: fmtVec4(theirBC),
+		})
+	}
+
+	// metallicFactor
+	baseMet := bPBR.MetallicFactorOrDefault()
+	ourMet, theirMet := oPBR.MetallicFactorOrDefault(), tPBR.MetallicFactorOrDefault()
+	if nearEq(ourMet, baseMet) && !nearEq(theirMet, baseMet) {
+		setMetallic(out, theirMet)
+	} else if !nearEq(ourMet, baseMet) && !nearEq(theirMet, baseMet) && !nearEq(ourMet, theirMet) {
+		*conflicts = append(*conflicts, handler.SemanticConflict{
+			Path: "materials." + name + ".metallicFactor",
+			Ours: fmtF(ourMet), Theirs: fmtF(theirMet),
+		})
+	}
+
+	// roughnessFactor
+	baseRough := bPBR.RoughnessFactorOrDefault()
+	ourRough, theirRough := oPBR.RoughnessFactorOrDefault(), tPBR.RoughnessFactorOrDefault()
+	if nearEq(ourRough, baseRough) && !nearEq(theirRough, baseRough) {
+		setRoughness(out, theirRough)
+	} else if !nearEq(ourRough, baseRough) && !nearEq(theirRough, baseRough) && !nearEq(ourRough, theirRough) {
+		*conflicts = append(*conflicts, handler.SemanticConflict{
+			Path: "materials." + name + ".roughnessFactor",
+			Ours: fmtF(ourRough), Theirs: fmtF(theirRough),
+		})
+	}
+
+	// alphaMode
+	var baseAlpha gltf.AlphaMode
+	if bm != nil {
+		baseAlpha = bm.AlphaMode
+	}
+	if om.AlphaMode == baseAlpha && tm.AlphaMode != baseAlpha {
+		out.AlphaMode = tm.AlphaMode
+	} else if om.AlphaMode != baseAlpha && tm.AlphaMode != baseAlpha && om.AlphaMode != tm.AlphaMode {
+		*conflicts = append(*conflicts, handler.SemanticConflict{
+			Path: "materials." + name + ".alphaMode",
+			Ours: string(om.AlphaMode), Theirs: string(tm.AlphaMode),
+		})
+	}
+
+	// doubleSided
+	var baseDS bool
+	if bm != nil {
+		baseDS = bm.DoubleSided
+	}
+	if om.DoubleSided == baseDS && tm.DoubleSided != baseDS {
+		out.DoubleSided = tm.DoubleSided
+	} else if om.DoubleSided != baseDS && tm.DoubleSided != baseDS && om.DoubleSided != tm.DoubleSided {
+		*conflicts = append(*conflicts, handler.SemanticConflict{
+			Path:   "materials." + name + ".doubleSided",
+			Ours:   fmt.Sprintf("%v", om.DoubleSided),
+			Theirs: fmt.Sprintf("%v", tm.DoubleSided),
+		})
+	}
+
+	return out
+}
+
+func cloneMaterial(m *gltf.Material) *gltf.Material {
+	c := *m
+	if m.PBRMetallicRoughness != nil {
+		pbr := *m.PBRMetallicRoughness
+		if pbr.BaseColorFactor != nil {
+			bc := *pbr.BaseColorFactor
+			pbr.BaseColorFactor = &bc
+		}
+		if pbr.MetallicFactor != nil {
+			mf := *pbr.MetallicFactor
+			pbr.MetallicFactor = &mf
+		}
+		if pbr.RoughnessFactor != nil {
+			rf := *pbr.RoughnessFactor
+			pbr.RoughnessFactor = &rf
+		}
+		c.PBRMetallicRoughness = &pbr
+	}
+	return &c
+}
+
+func setBaseColor(m *gltf.Material, v [4]float64) {
+	if m.PBRMetallicRoughness == nil {
+		m.PBRMetallicRoughness = &gltf.PBRMetallicRoughness{}
+	}
+	m.PBRMetallicRoughness.BaseColorFactor = &v
+}
+
+func setMetallic(m *gltf.Material, v float64) {
+	if m.PBRMetallicRoughness == nil {
+		m.PBRMetallicRoughness = &gltf.PBRMetallicRoughness{}
+	}
+	m.PBRMetallicRoughness.MetallicFactor = &v
+}
+
+func setRoughness(m *gltf.Material, v float64) {
+	if m.PBRMetallicRoughness == nil {
+		m.PBRMetallicRoughness = &gltf.PBRMetallicRoughness{}
+	}
+	m.PBRMetallicRoughness.RoughnessFactor = &v
+}
+
+// ── serialisation ─────────────────────────────────────────────────────────────
+
+// isGLB returns true if the blob starts with the GLB magic bytes ("glTF").
+func isGLB(blob handler.Blob) bool {
+	return len(blob) >= 4 && string(blob[:4]) == "glTF"
+}
+
+func encodeBlob(doc *gltf.Document, binary bool) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := gltf.NewEncoder(&buf)
+	enc.AsBinary = binary
+	if err := enc.Encode(doc); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // Diff produces a hierarchical semantic diff of two glTF/GLB blobs,
@@ -168,7 +552,7 @@ func diffNodeProps(a, b *gltf.Node) []handler.DiffChange {
 	if ra, rb := a.RotationOrDefault(), b.RotationOrDefault(); !nearEq4(ra, rb) {
 		changes = append(changes, handler.DiffChange{
 			Path: "rotation", Label: "rotation",
-			Kind: handler.Modified, Before: fmtVec4(ra), After: fmtVec4(rb),
+			Kind: handler.Modified, Before: fmtRot(ra), After: fmtRot(rb),
 		})
 	}
 
@@ -501,6 +885,41 @@ func nearEq4(a, b [4]float64) bool {
 }
 
 // fmtF formats a float64 using float32 precision (matches GLB binary storage).
+
+// quatToEulerXYZ converts a glTF quaternion [x,y,z,w] to XYZ Euler angles in
+// degrees. Quaternions are orientation-only (no winding count), so a value like
+// "594°" from a DCC tool becomes its equivalent orientation in [-180°, 180°].
+func quatToEulerXYZ(q [4]float64) [3]float64 {
+	qx, qy, qz, qw := q[0], q[1], q[2], q[3]
+	const toDeg = 180.0 / math.Pi
+
+	// X (roll)
+	sinr := 2 * (qw*qx + qy*qz)
+	cosr := 1 - 2*(qx*qx+qy*qy)
+	x := math.Atan2(sinr, cosr) * toDeg
+
+	// Y (pitch) — clamp to avoid NaN at poles
+	sinp := 2 * (qw*qy - qz*qx)
+	if sinp > 1 {
+		sinp = 1
+	} else if sinp < -1 {
+		sinp = -1
+	}
+	y := math.Asin(sinp) * toDeg
+
+	// Z (yaw)
+	siny := 2 * (qw*qz + qx*qy)
+	cosy := 1 - 2*(qy*qy+qz*qz)
+	z := math.Atan2(siny, cosy) * toDeg
+
+	return [3]float64{x, y, z}
+}
+
+// fmtRot formats a quaternion as human-readable XYZ Euler degrees.
+func fmtRot(q [4]float64) string {
+	e := quatToEulerXYZ(q)
+	return fmt.Sprintf("(%s° %s° %s°)", fmtF(e[0]), fmtF(e[1]), fmtF(e[2]))
+}
 func fmtF(v float64) string {
 	return strconv.FormatFloat(v, 'f', -1, 32)
 }
