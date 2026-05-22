@@ -738,13 +738,27 @@ func openInMergeTool(tool, path string) error {
 
 func mergeCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "merge <branch>",
-		Short: "Merge a branch with semantic conflict resolution (M3)",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return fmt.Errorf("forge merge is not yet implemented (planned for M3)")
-		},
+		Use:                "merge",
+		Short:              "Merge a branch, using Forge handlers for supported formats",
+		DisableFlagParsing: true,
+		RunE:               runMerge,
 	}
+}
+
+func runMerge(_ *cobra.Command, args []string) error {
+	c := exec.Command("git", append([]string{"merge"}, args...)...)
+	c.Stdin = os.Stdin
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+	err := c.Run()
+	if err != nil {
+		// git merge exited non-zero — conflicts or error.
+		// Print a forge-aware hint on top of git's own output.
+		fmt.Fprintln(os.Stderr, "\nTo resolve conflicts run: forge mergetool")
+		fmt.Fprintln(os.Stderr, "Then: git add <files> && git commit")
+		os.Exit(c.ProcessState.ExitCode())
+	}
+	return nil
 }
 
 // ── forge merge-file ──────────────────────────────────────────────────────────
