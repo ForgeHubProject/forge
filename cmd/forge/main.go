@@ -845,14 +845,78 @@ func resolveMergeTool() string {
 	return "vi"
 }
 
-// openInMergeTool opens path in the given tool, connecting stdin/stdout/stderr
-// so interactive editors work correctly.
+// threeWayTools lists GUI diff tools that accept positional (local, merged, remote) args
+// and render a proper 3-pane conflict view when given all three.
+var threeWayTools = map[string]bool{
+	"meld": true, "kdiff3": true, "xxdiff": true, "diffuse": true,
+	"tkdiff": true, "diffmerge": true, "bc": true, "bcompare": true,
+}
+
+// openInMergeTool opens path in the given tool. For 3-way capable tools it
+// extracts LOCAL and REMOTE from git's index and passes all three files so
+// the tool shows a proper conflict view instead of raw markers.
 func openInMergeTool(tool, path string) error {
-	c := exec.Command(tool, path)
+	args := []string{path}
+	var cleanup []string
+
+	if threeWayTools[filepath.Base(tool)] {
+		local, remote, err := extractConflictVersions(path)
+		if err == nil {
+			args = []string{local, path, remote}
+			cleanup = []string{local, remote}
+		}
+	}
+
+	c := exec.Command(tool, args...)
 	c.Stdin = os.Stdin
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
-	return c.Run()
+	err := c.Run()
+	for _, f := range cleanup {
+		os.Remove(f)
+	}
+	return err
+}
+
+// extractConflictVersions writes the :2: (LOCAL/ours) and :3: (REMOTE/theirs)
+// index versions of path to temp files, returning their paths.
+// The caller is responsible for removing the files when done.
+func extractConflictVersions(path string) (localFile, remoteFile string, err error) {
+	localData, err := exec.Command("git", "show", ":2:"+path).Output()
+	if err != nil {
+		return "", "", fmt.Errorf("git show :2:%s: %w", path, err)
+	}
+	remoteData, err := exec.Command("git", "show", ":3:"+path).Output()
+	if err != nil {
+		return "", "", fmt.Errorf("git show :3:%s: %w", path, err)
+	}
+
+	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	ext := filepath.Ext(path)
+
+	lf, err := os.CreateTemp("", "forge-LOCAL-"+base+"-*"+ext)
+	if err != nil {
+		return "", "", err
+	}
+	defer lf.Close()
+	if _, err = lf.Write(localData); err != nil {
+		os.Remove(lf.Name())
+		return "", "", err
+	}
+
+	rf, err := os.CreateTemp("", "forge-REMOTE-"+base+"-*"+ext)
+	if err != nil {
+		os.Remove(lf.Name())
+		return "", "", err
+	}
+	defer rf.Close()
+	if _, err = rf.Write(remoteData); err != nil {
+		os.Remove(lf.Name())
+		os.Remove(rf.Name())
+		return "", "", err
+	}
+
+	return lf.Name(), rf.Name(), nil
 }
 
 // ── forge merge ───────────────────────────────────────────────────────────────
