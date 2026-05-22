@@ -78,6 +78,27 @@ type ForgeHandler interface {
 
 A handler that cannot implement `Merge` may return `ErrNotSupported` — Forge falls back to "pick a side" (the same as plain git today). `Diff` alone is already a massive improvement over "Binary files differ."
 
+### Optional: ConflictRenderer
+
+Handlers may also implement `ConflictRenderer` to provide format-aware display inside `forge mergetool`. Handlers that don't implement it fall back to the generic current/incoming prompt — the interface is opt-in at every tier.
+
+```go
+// ConflictRenderer is the "different channels on the same TV" contract:
+// forge mergetool drives the interaction; each handler renders its own content.
+type ConflictRenderer interface {
+    // RenderConflict returns human-readable representations of the two sides
+    // of one semantic conflict (e.g. "[0, 1.8, 0]" vs "[0, 2.0, 0]").
+    RenderConflict(c SemanticConflict) (current, incoming string)
+
+    // RenderMerged returns a human-readable summary of the accumulated merged
+    // state — shown in the middle pane as the user makes conflict-by-conflict
+    // choices. For glTF this might list resolved nodes and their final values.
+    RenderMerged(blob Blob) string
+}
+```
+
+Long-term, a community handler package can ship its `ConflictRenderer` alongside its `Diff` and `Merge` logic, giving users a rich, format-specific resolution experience without forge needing to know anything about the format.
+
 ### Supporting types
 
 ```go
@@ -236,7 +257,9 @@ A glTF handler in the CLI produces a `StructuredDiff`. ForgeHub's `GltfDiffViewe
 ### M3 — Conflict UX
 - [x] Define conflict marker format for non-text formats (binary stays valid; sidecar `.forge-conflict` for conflict paths)
 - [x] `forge mergetool` dispatches to handler-specific resolution UI
-- [x] CLI conflict resolution for text (opens `$MERGE_TOOL` / `$EDITOR`, checks markers cleared)
+- [x] CLI conflict resolution for text (opens `$MERGE_TOOL` / `$EDITOR`, auto-detects tool from git's built-in list, checks markers cleared)
+- [ ] `forge merge-file` writes a structured JSON sidecar (`ConflictInfo` with ours/theirs values per conflict path, not just path strings)
+- [ ] Conflict-by-conflict interactive prompt in `forge mergetool` for binary formats — pick `[c]urrent` or `[i]ncoming` per property; forge re-serializes a valid output file from the choices
 - [ ] ForgeHub conflict resolution UI for glTF
 
 ### M4 — Community SDK
@@ -245,6 +268,14 @@ A glTF handler in the CLI produces a `StructuredDiff`. ForgeHub's `GltfDiffViewe
 - [ ] Per-repo `.forge/handlers` manifest with registry pinning
 - [ ] `forge handler install` / `forge handler list` / `forge handler sources`
 - [ ] Documentation and example handler template
+- [ ] `ConflictRenderer` interface shipped as part of the standalone SDK — handlers opt in to provide format-aware conflict display
+
+### M5 — forge mergetool TUI
+- [ ] 3-pane terminal UI (`bubbletea` + `lipgloss`): current | merged preview | incoming
+- [ ] Middle pane updates live as the user resolves conflicts one by one
+- [ ] Handlers that implement `ConflictRenderer` drive their own left/right pane content
+- [ ] Handlers that don't implement it get the generic property-label display
+- [ ] Navigation: next/prev conflict, accept-all-current, accept-all-incoming
 
 ---
 
