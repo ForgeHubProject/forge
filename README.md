@@ -234,9 +234,9 @@ A glTF handler in the CLI produces a `StructuredDiff`. ForgeHub's `GltfDiffViewe
 - [x] `GltfHandler.Merge()` — non-overlapping node changes merge cleanly
 
 ### M3 — Conflict UX
-- [ ] Define conflict marker format for non-text formats
-- [ ] `forge mergetool` dispatches to handler-specific resolution UI
-- [ ] CLI conflict resolution for text (identical to git)
+- [x] Define conflict marker format for non-text formats (binary stays valid; sidecar `.forge-conflict` for conflict paths)
+- [x] `forge mergetool` dispatches to handler-specific resolution UI
+- [x] CLI conflict resolution for text (opens `$MERGE_TOOL` / `$EDITOR`, checks markers cleared)
 - [ ] ForgeHub conflict resolution UI for glTF
 
 ### M4 — Community SDK
