@@ -1128,50 +1128,47 @@ func runMergeFile(_ *cobra.Command, args []string) error {
 
 // ── forge log ─────────────────────────────────────────────────────────────────
 
-func logCmd() *cobra.Command {
+// ── git pass-throughs ─────────────────────────────────────────────────────────
+// gitPassthrough returns a cobra.Command that forwards all arguments verbatim
+// to the equivalent git sub-command. DisableFlagParsing lets flags like
+// --oneline or -m pass through without cobra trying to interpret them.
+
+func gitPassthrough(name, short string) *cobra.Command {
 	return &cobra.Command{
-		Use:   "log",
-		Short: "Show commit log with format-aware metadata (M2)",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return fmt.Errorf("forge log is not yet implemented (planned for M2)")
+		Use:                name,
+		Short:              short,
+		DisableFlagParsing: true,
+		RunE: func(_ *cobra.Command, args []string) error {
+			c := exec.Command("git", append([]string{name}, args...)...)
+			c.Stdin = os.Stdin
+			c.Stdout = os.Stdout
+			c.Stderr = os.Stderr
+			return c.Run()
 		},
 	}
+}
+
+func logCmd() *cobra.Command {
+	return gitPassthrough("log", "Show commit log (delegates to git)")
 }
 
 // ── forge push / pull ─────────────────────────────────────────────────────────
 
 func pushCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:                "push",
-		Short:              "Push to remote (delegates to git)",
-		DisableFlagParsing: true,
-		RunE:               delegateToGit("push"),
-	}
+	return gitPassthrough("push", "Push to remote (delegates to git)")
 }
 
 func pullCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:                "pull",
-		Short:              "Pull from remote (delegates to git)",
-		DisableFlagParsing: true,
-		RunE:               delegateToGit("pull"),
-	}
+	return gitPassthrough("pull", "Pull from remote (delegates to git)")
 }
 
 func delegateToGit(sub string) func(*cobra.Command, []string) error {
-	return func(cmd *cobra.Command, args []string) error {
-		argv := append([]string{sub}, args...)
-		proc, err := os.StartProcess("/usr/bin/git", append([]string{"git"}, argv...), &os.ProcAttr{
-			Files: []*os.File{os.Stdin, os.Stdout, os.Stderr},
-		})
-		if err != nil {
-			return fmt.Errorf("could not start git: %w", err)
-		}
-		state, err := proc.Wait()
-		if err != nil {
-			return err
-		}
-		os.Exit(state.ExitCode())
-		return nil
+	return func(_ *cobra.Command, args []string) error {
+		c := exec.Command("git", append([]string{sub}, args...)...)
+		c.Stdin = os.Stdin
+		c.Stdout = os.Stdout
+		c.Stderr = os.Stderr
+		return c.Run()
 	}
 }
+
