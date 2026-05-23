@@ -67,6 +67,25 @@ type Namer interface {
 	Format() string
 }
 
+// ConflictSidecar is written by forge merge-file alongside the merged file
+// whenever semantic conflicts exist. forge mergetool reads it to drive the
+// interactive conflict resolver.
+type ConflictSidecar struct {
+	Handler   string             `json:"handler"`
+	Conflicts []SemanticConflict `json:"conflicts"`
+	TheirsB64 string             `json:"theirs_blob"` // base64-encoded theirs blob
+}
+
+// ConflictApplier is an optional interface handlers may implement to support
+// interactive conflict resolution in forge mergetool.
+// Handlers that don't implement it fall back to the generic "resolve externally" message.
+type ConflictApplier interface {
+	// ApplyChoices patches merged (which holds "ours" for all conflicts) by
+	// replacing the values at takePaths with the corresponding values from theirs.
+	// Returns a valid, fully re-serialized output blob.
+	ApplyChoices(merged, theirs Blob, takePaths []string) (Blob, error)
+}
+
 // Domain groups a family of ForgeHandlers under a shared abstraction
 // (e.g. all 3D formats, all raster images). It is itself a ForgeHandler,
 // acting as the domain-level fallback when no specific handler matches.
