@@ -48,6 +48,7 @@ func rootCmd() *cobra.Command {
 		logCmd(),
 		pushCmd(),
 		pullCmd(),
+		gitPassthrough("add", "Stage file contents (delegates to git)"),
 	)
 	return root
 }
