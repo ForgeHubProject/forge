@@ -52,6 +52,7 @@ func rootCmd() *cobra.Command {
 		gitPassthrough("commit", "Record staged changes (delegates to git)"),
 		gitPassthrough("branch", "List, create or delete branches (delegates to git)"),
 		gitPassthrough("checkout", "Switch branches or restore files (delegates to git)"),
+		gitPassthrough("switch", "Switch branches (delegates to git)"),
 	)
 	return root
 }
