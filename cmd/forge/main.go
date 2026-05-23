@@ -451,7 +451,7 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	reg := defaultRegistry()
 
 	if len(args) == 1 {
-		return diffFile(repo, reg, args[0])
+		return diffFile(repo, reg, cleanPath(args[0]))
 	}
 
 	// No file given: diff all changed files.
@@ -471,11 +471,28 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// cleanPath normalises a user-supplied file path for use with go-git and git
+// commands. It removes leading ./ and .\ (common from PowerShell tab-completion)
+// and converts backslashes to forward slashes.
+func cleanPath(p string) string {
+	return filepath.ToSlash(filepath.Clean(p))
+}
+
 func diffFile(repo *gitrepo.Repo, reg *handler.Registry, path string) error {
+	path = cleanPath(path)
 	h, err := reg.Resolve(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "forge: %v\n", err)
-		return nil // degrade gracefully, don't abort
+		return nil
+	}
+
+	// Text files: delegate to git diff for familiar unified-diff output.
+	if n, ok := h.(interface{ Format() string }); ok && n.Format() == "text" {
+		c := exec.Command("git", "diff", "HEAD", "--", path)
+		c.Stdout = os.Stdout
+		c.Stderr = os.Stderr
+		_ = c.Run()
+		return nil
 	}
 
 	base, err := repo.BlobAtHEAD(filepath.ToSlash(path))
@@ -1053,7 +1070,7 @@ written into OURS so you can inspect and resolve them).`,
 }
 
 func runMergeFile(_ *cobra.Command, args []string) error {
-	basePath, oursPath, theirsPath := args[0], args[1], args[2]
+	basePath, oursPath, theirsPath := cleanPath(args[0]), cleanPath(args[1]), cleanPath(args[2])
 
 	base, err := os.ReadFile(basePath)
 	if err != nil {
