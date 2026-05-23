@@ -56,6 +56,7 @@ func rootCmd() *cobra.Command {
 		gitPassthrough("fetch", "Download objects and refs from remote (delegates to git)"),
 		gitPassthrough("stash", "Stash working tree changes (delegates to git)"),
 		gitPassthrough("reset", "Reset HEAD or working tree (delegates to git)"),
+		gitPassthrough("restore", "Restore working tree files (delegates to git)"),
 	)
 	return root
 }
