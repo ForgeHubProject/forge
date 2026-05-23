@@ -59,6 +59,7 @@ func rootCmd() *cobra.Command {
 		gitPassthrough("restore", "Restore working tree files (delegates to git)"),
 		gitPassthrough("rebase", "Reapply commits on top of another branch (delegates to git)"),
 		gitPassthrough("tag", "Create, list or delete tags (delegates to git)"),
+		gitPassthrough("remote", "Manage remote connections (delegates to git)"),
 	)
 	return root
 }
