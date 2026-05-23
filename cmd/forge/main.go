@@ -54,6 +54,7 @@ func rootCmd() *cobra.Command {
 		gitPassthrough("checkout", "Switch branches or restore files (delegates to git)"),
 		gitPassthrough("switch", "Switch branches (delegates to git)"),
 		gitPassthrough("fetch", "Download objects and refs from remote (delegates to git)"),
+		gitPassthrough("stash", "Stash working tree changes (delegates to git)"),
 	)
 	return root
 }
