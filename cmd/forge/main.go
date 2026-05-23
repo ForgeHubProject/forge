@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -40,6 +44,7 @@ func rootCmd() *cobra.Command {
 		diffCmd(),
 		mergeCmd(),
 		mergeFileCmd(),
+		mergeToolCmd(),
 		logCmd(),
 		pushCmd(),
 		pullCmd(),
@@ -106,8 +111,58 @@ func runInit(_ *cobra.Command, args []string) error {
 		}
 	}
 
+	if err := setupGitMergeDriver(dir); err != nil {
+		fmt.Fprintf(os.Stderr, "forge: warning: could not configure git merge driver: %v\n", err)
+	}
+
 	abs, _ := filepath.Abs(dir)
 	fmt.Printf("Initialized Forge repository in %s\n", abs)
+	return nil
+}
+
+// setupGitMergeDriver writes .gitattributes entries for supported binary formats
+// and registers the [merge "forge"] driver in .git/config so that git merge
+// automatically calls forge merge-file for those formats.
+func setupGitMergeDriver(repoDir string) error {
+	// .gitattributes — append entries that aren't already present
+	attrPath := filepath.Join(repoDir, ".gitattributes")
+	existing, _ := os.ReadFile(attrPath)
+	entries := []string{
+		"*.glb  merge=forge",
+		"*.gltf merge=forge",
+	}
+	var toAdd []string
+	for _, e := range entries {
+		if !bytes.Contains(existing, []byte(e[:6])) { // match on extension prefix
+			toAdd = append(toAdd, e)
+		}
+	}
+	if len(toAdd) > 0 {
+		f, err := os.OpenFile(attrPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return err
+		}
+		if len(existing) > 0 && !bytes.HasSuffix(existing, []byte("\n")) {
+			fmt.Fprintln(f)
+		}
+		fmt.Fprintln(f, "# Forge semantic merge drivers")
+		for _, e := range toAdd {
+			fmt.Fprintln(f, e)
+		}
+		f.Close()
+	}
+
+	// .git/config — register [merge "forge"] driver once
+	gitConfigPath := filepath.Join(repoDir, ".git", "config")
+	gitConfig, _ := os.ReadFile(gitConfigPath)
+	if !bytes.Contains(gitConfig, []byte(`[merge "forge"]`)) {
+		f, err := os.OpenFile(gitConfigPath, os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(f, "\n[merge \"forge\"]\n\tname = Forge semantic merge\n\tdriver = forge merge-file %%O %%A %%B\n")
+		f.Close()
+	}
 	return nil
 }
 
@@ -501,17 +556,484 @@ func renderChanges(changes []handler.DiffChange, connPrefix, contPrefix string) 
 	}
 }
 
+// ── forge mergetool ───────────────────────────────────────────────────────────
+
+func mergeToolCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "mergetool [file...]",
+		Short: "Resolve merge conflicts using the format-appropriate tool",
+		Long: `Opens each conflicted file in a resolution tool and checks the result.
+
+For text files: opens in $MERGE_TOOL, $VISUAL, $EDITOR, or the first
+available tool from git's built-in list (meld, vimdiff, vim, vi…).
+Conflict is resolved when all
+<<<<<<< markers have been removed.
+
+For binary formats (.glb, .gltf): prints the semantic conflict paths
+so you can resolve them in your DCC tool (Blender, etc.), then re-export
+the file and run 'git add <file>'.
+
+After all conflicts are resolved: run 'git add <file>' and 'git commit'.`,
+		Args: cobra.ArbitraryArgs,
+		RunE: runMergeTool,
+	}
+}
+
+func runMergeTool(_ *cobra.Command, args []string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+
+	var files []string
+	if len(args) > 0 {
+		files = args
+	} else {
+		files, err = findConflictedFiles(cwd)
+		if err != nil {
+			return err
+		}
+	}
+
+	if len(files) == 0 {
+		fmt.Println("No files need merging.")
+		return nil
+	}
+
+	reg := defaultRegistry()
+	tool := resolveMergeTool()
+	resolved, total := 0, len(files)
+
+	for _, f := range files {
+		fmt.Printf("\nMerging %s\n", f)
+
+		h, _ := reg.Resolve(f)
+		isBinary := h != nil && isBinaryHandler(h)
+
+		if isBinary {
+			if resolveInteractive(f, h) {
+				resolved++
+			}
+			continue
+		}
+
+		// Text: open in editor, check markers after.
+		if err := openInMergeTool(tool, f); err != nil {
+			fmt.Fprintf(os.Stderr, "forge: could not open %s in %q: %v\n", f, tool, err)
+			continue
+		}
+		if hasConflictMarkers(f) {
+			fmt.Printf("%s: conflict markers remain — not resolved\n", f)
+		} else {
+			fmt.Printf("%s: resolved\n", f)
+			resolved++
+		}
+	}
+
+	fmt.Printf("\n%d/%d file(s) resolved.\n", resolved, total)
+	if resolved < total {
+		fmt.Println("Run 'git add <file>' and 'git commit' once all conflicts are resolved.")
+		os.Exit(1)
+	}
+	fmt.Println("All conflicts resolved. Run 'git add' and 'git commit' to complete the merge.")
+	return nil
+}
+
+// findConflictedFiles returns paths of files that have unresolved merge conflicts.
+// It detects both text files (<<<<<<< markers) and binary files (unmerged index
+// entries from git ls-files -u), so forge mergetool works even when the forge
+// merge driver was not the one that ran.
+func findConflictedFiles(root string) ([]string, error) {
+	seen := make(map[string]bool)
+	var conflicted []string
+
+	// 1. Binary / any format: ask git which files have unmerged index entries.
+	out, err := exec.Command("git", "ls-files", "-u", "--format=%(path)").Output()
+	if err != nil {
+		// older git may not support --format; fall back to parsing raw output
+		out, _ = exec.Command("git", "ls-files", "-u").Output()
+		for _, line := range strings.Split(string(out), "\n") {
+			// raw format: "<mode> <hash> <stage>\t<path>"
+			parts := strings.SplitN(line, "\t", 2)
+			if len(parts) == 2 {
+				p := strings.TrimSpace(parts[1])
+				if p != "" && !seen[p] {
+					seen[p] = true
+					conflicted = append(conflicted, p)
+				}
+			}
+		}
+	} else {
+		for _, p := range strings.Split(string(out), "\n") {
+			p = strings.TrimSpace(p)
+			if p != "" && !seen[p] {
+				seen[p] = true
+				conflicted = append(conflicted, p)
+			}
+		}
+	}
+
+	// 2. Text files not caught above: scan for <<<<<<< markers in working tree.
+	r, err := gogit.PlainOpenWithOptions(root, &gogit.PlainOpenOptions{DetectDotGit: true})
+	if err == nil {
+		if wt, err := r.Worktree(); err == nil {
+			if st, err := wt.Status(); err == nil {
+				for path := range st {
+					if seen[path] {
+						continue
+					}
+					abs := filepath.Join(root, filepath.FromSlash(path))
+					if hasConflictMarkers(abs) {
+						seen[path] = true
+						conflicted = append(conflicted, path)
+					}
+				}
+			}
+		}
+	}
+
+	sort.Strings(conflicted)
+	return conflicted, nil
+}
+
+// hasConflictMarkers reports whether a file contains git conflict marker lines.
+func hasConflictMarkers(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return bytes.Contains(data, []byte("<<<<<<<"))
+}
+
+// isBinaryHandler returns true for handlers that produce binary output (not
+// text conflict markers), meaning resolution must happen in an external tool.
+func isBinaryHandler(h handler.ForgeHandler) bool {
+	n, ok := h.(handler.Namer)
+	if !ok {
+		return false
+	}
+	switch n.Format() {
+	case "gltf", "3d", "image":
+		return true
+	}
+	return false
+}
+
+// resolveInteractive drives the conflict-by-conflict prompt for binary formats.
+// Returns true when the file is fully resolved and written back.
+func resolveInteractive(path string, h handler.ForgeHandler) bool {
+	sidecarPath := path + ".forge-conflict"
+	raw, err := os.ReadFile(sidecarPath)
+	if err != nil {
+		// No sidecar — forge merge-file wasn't the merge driver (e.g. plain git
+		// merge on a binary). Run the semantic merge now using the index stages.
+		if mergeErr := runSemanticMergeFromIndex(path, h); mergeErr != nil {
+			fmt.Printf("%s: binary conflict — resolve in your DCC tool and re-export.\n", path)
+			fmt.Printf("  (%v)\n", mergeErr)
+			fmt.Printf("Run 'git add %s' once ready.\n", path)
+			return promptConfirm(fmt.Sprintf("Mark %s as resolved?", path))
+		}
+		// Sidecar has now been written; read it.
+		raw, err = os.ReadFile(sidecarPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "forge: sidecar still missing after on-the-fly merge: %v\n", err)
+			return false
+		}
+	}
+
+	var sc handler.ConflictSidecar
+	if err := json.Unmarshal(raw, &sc); err != nil {
+		fmt.Fprintf(os.Stderr, "forge: malformed sidecar for %s: %v\n", path, err)
+		return false
+	}
+
+	applier, canApply := h.(handler.ConflictApplier)
+	if !canApply {
+		// Handler exists but doesn't support ApplyChoices — print and ask to confirm.
+		fmt.Printf("Conflicts in %s:\n", path)
+		for _, c := range sc.Conflicts {
+			fmt.Printf("  %s\n    current:  %v\n    incoming: %v\n", c.Path, c.Ours, c.Theirs)
+		}
+		fmt.Printf("Resolve in your DCC tool and re-export, then 'git add %s'.\n", path)
+		return promptConfirm(fmt.Sprintf("Mark %s as resolved?", path))
+	}
+
+	n := len(sc.Conflicts)
+	// choices[i] == true → take theirs (incoming); false → keep ours (current, the default)
+	choices := make([]bool, n)
+	idx := 0
+
+	for {
+		c := sc.Conflicts[idx]
+		dot := func(want bool) string {
+			if choices[idx] == want {
+				return "●"
+			}
+			return " "
+		}
+		fmt.Printf("\n%s  ─  %d conflict(s)   [%d/%d]\n", path, n, idx+1, n)
+		fmt.Printf("  path:     %s\n", c.Path)
+		fmt.Printf("  ──────────────────────────────────────────\n")
+		fmt.Printf("  [c] %s current   %v\n", dot(false), c.Ours)
+		fmt.Printf("  [i] %s incoming  %v\n", dot(true), c.Theirs)
+		fmt.Printf("\n  c/i = pick · n = next · p = prev · a = apply · q = quit\n")
+		fmt.Printf("  > ")
+
+		var input string
+		fmt.Scanln(&input)
+		switch strings.ToLower(strings.TrimSpace(input)) {
+		case "c":
+			choices[idx] = false
+			if idx < n-1 {
+				idx++
+			}
+		case "i":
+			choices[idx] = true
+			if idx < n-1 {
+				idx++
+			}
+		case "n":
+			if idx < n-1 {
+				idx++
+			}
+		case "p":
+			if idx > 0 {
+				idx--
+			}
+		case "a":
+			return applyConflictChoices(path, sidecarPath, sc, choices, applier)
+		case "q":
+			fmt.Println("Aborted — no changes made.")
+			return false
+		}
+	}
+}
+
+// applyConflictChoices prints a summary, asks for confirmation, then patches
+// the merged file and removes the sidecar.
+func applyConflictChoices(path, sidecarPath string, sc handler.ConflictSidecar, choices []bool, applier handler.ConflictApplier) bool {
+	fmt.Printf("\nSummary for %s:\n", path)
+	var takePaths []string
+	for i, c := range sc.Conflicts {
+		label, val := "current ", c.Ours
+		if choices[i] {
+			label, val = "incoming", c.Theirs
+			takePaths = append(takePaths, c.Path)
+		}
+		fmt.Printf("  [%d/%d]  %-45s → %s  %v\n", i+1, len(sc.Conflicts), c.Path, label, val)
+	}
+	if !promptConfirm("Apply these choices?") {
+		fmt.Println("Aborted — no changes made.")
+		return false
+	}
+
+	theirsBlob, err := base64.StdEncoding.DecodeString(sc.TheirsB64)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "forge: could not decode theirs blob: %v\n", err)
+		return false
+	}
+	merged, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "forge: could not read %s: %v\n", path, err)
+		return false
+	}
+	result, err := applier.ApplyChoices(merged, theirsBlob, takePaths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "forge: ApplyChoices failed: %v\n", err)
+		return false
+	}
+	if err := os.WriteFile(path, result, 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "forge: could not write %s: %v\n", path, err)
+		return false
+	}
+	_ = os.Remove(sidecarPath)
+	fmt.Printf("%s: resolved.\n", path)
+	return true
+}
+
+func promptConfirm(prompt string) bool {
+	fmt.Printf("%s [Y/n] ", prompt)
+	var answer string
+	fmt.Scanln(&answer)
+	a := strings.ToLower(strings.TrimSpace(answer))
+	return a == "" || a == "y"
+}
+
+// runSemanticMergeFromIndex extracts the :1: (base), :2: (ours), :3: (theirs)
+// versions of path from the git index, runs the format handler's Merge(), and
+// writes the merged result plus a .forge-conflict sidecar — exactly what
+// forge merge-file would have done had it been the configured merge driver.
+func runSemanticMergeFromIndex(path string, h handler.ForgeHandler) error {
+	readStage := func(stage int) ([]byte, error) {
+		data, err := exec.Command("git", "show", fmt.Sprintf(":%d:%s", stage, path)).Output()
+		if err != nil {
+			return nil, fmt.Errorf("git show :%d:%s: %w", stage, path, err)
+		}
+		return data, nil
+	}
+
+	base, err := readStage(1)
+	if err != nil {
+		return err
+	}
+	ours, err := readStage(2)
+	if err != nil {
+		return err
+	}
+	theirs, err := readStage(3)
+	if err != nil {
+		return err
+	}
+
+	merged, ci, err := h.Merge(base, ours, theirs)
+	if err != nil {
+		return fmt.Errorf("semantic merge: %w", err)
+	}
+
+	if err := os.WriteFile(path, merged, 0644); err != nil {
+		return fmt.Errorf("writing merged result: %w", err)
+	}
+
+	if ci != nil && len(ci.Conflicts) > 0 {
+		format := "unknown"
+		if n, ok := h.(interface{ Format() string }); ok {
+			format = n.Format()
+		}
+		sc := handler.ConflictSidecar{
+			Handler:   format,
+			Conflicts: ci.Conflicts,
+			TheirsB64: base64.StdEncoding.EncodeToString(theirs),
+		}
+		if data, err := json.MarshalIndent(sc, "", "  "); err == nil {
+			_ = os.WriteFile(path+".forge-conflict", data, 0644)
+		}
+	}
+	return nil
+}
+
+// resolveMergeTool returns the merge tool to use.
+// Precedence: MERGE_TOOL → GIT_MERGETOOL → VISUAL → EDITOR →
+// first available tool from git's built-in auto-detection list → "vi".
+func resolveMergeTool() string {
+	for _, env := range []string{"MERGE_TOOL", "GIT_MERGETOOL", "VISUAL", "EDITOR"} {
+		if v := os.Getenv(env); v != "" {
+			return v
+		}
+	}
+	// Mirror git's built-in auto-detection order.
+	builtins := []string{
+		"meld", "opendiff", "kdiff3", "tkdiff", "xxdiff",
+		"tortoisemerge", "gvimdiff", "diffuse", "diffmerge",
+		"ecmerge", "p4merge", "araxis", "bc", "codecompare",
+		"smerge", "emerge", "nvimdiff", "nvim", "vimdiff", "vim", "vi",
+	}
+	for _, t := range builtins {
+		if _, err := exec.LookPath(t); err == nil {
+			return t
+		}
+	}
+	return "vi"
+}
+
+// threeWayTools lists GUI diff tools that accept positional (local, merged, remote) args
+// and render a proper 3-pane conflict view when given all three.
+var threeWayTools = map[string]bool{
+	"meld": true, "kdiff3": true, "xxdiff": true, "diffuse": true,
+	"tkdiff": true, "diffmerge": true, "bc": true, "bcompare": true,
+}
+
+// openInMergeTool opens path in the given tool. For 3-way capable tools it
+// extracts LOCAL and REMOTE from git's index and passes all three files so
+// the tool shows a proper conflict view instead of raw markers.
+func openInMergeTool(tool, path string) error {
+	args := []string{path}
+	var cleanup []string
+
+	if threeWayTools[filepath.Base(tool)] {
+		local, remote, err := extractConflictVersions(path)
+		if err == nil {
+			args = []string{local, path, remote}
+			cleanup = []string{local, remote}
+		}
+	}
+
+	c := exec.Command(tool, args...)
+	c.Stdin = os.Stdin
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+	err := c.Run()
+	for _, f := range cleanup {
+		os.Remove(f)
+	}
+	return err
+}
+
+// extractConflictVersions writes the :2: (LOCAL/ours) and :3: (REMOTE/theirs)
+// index versions of path to temp files, returning their paths.
+// The caller is responsible for removing the files when done.
+func extractConflictVersions(path string) (localFile, remoteFile string, err error) {
+	localData, err := exec.Command("git", "show", ":2:"+path).Output()
+	if err != nil {
+		return "", "", fmt.Errorf("git show :2:%s: %w", path, err)
+	}
+	remoteData, err := exec.Command("git", "show", ":3:"+path).Output()
+	if err != nil {
+		return "", "", fmt.Errorf("git show :3:%s: %w", path, err)
+	}
+
+	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	ext := filepath.Ext(path)
+
+	lf, err := os.CreateTemp("", "forge-LOCAL-"+base+"-*"+ext)
+	if err != nil {
+		return "", "", err
+	}
+	defer lf.Close()
+	if _, err = lf.Write(localData); err != nil {
+		os.Remove(lf.Name())
+		return "", "", err
+	}
+
+	rf, err := os.CreateTemp("", "forge-REMOTE-"+base+"-*"+ext)
+	if err != nil {
+		os.Remove(lf.Name())
+		return "", "", err
+	}
+	defer rf.Close()
+	if _, err = rf.Write(remoteData); err != nil {
+		os.Remove(lf.Name())
+		os.Remove(rf.Name())
+		return "", "", err
+	}
+
+	return lf.Name(), rf.Name(), nil
+}
+
 // ── forge merge ───────────────────────────────────────────────────────────────
 
 func mergeCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "merge <branch>",
-		Short: "Merge a branch with semantic conflict resolution (M3)",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return fmt.Errorf("forge merge is not yet implemented (planned for M3)")
-		},
+		Use:                "merge",
+		Short:              "Merge a branch, using Forge handlers for supported formats",
+		DisableFlagParsing: true,
+		RunE:               runMerge,
 	}
+}
+
+func runMerge(_ *cobra.Command, args []string) error {
+	c := exec.Command("git", append([]string{"merge"}, args...)...)
+	c.Stdin = os.Stdin
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+	err := c.Run()
+	if err != nil {
+		// git merge exited non-zero — conflicts or error.
+		// Print a forge-aware hint on top of git's own output.
+		fmt.Fprintln(os.Stderr, "\nTo resolve conflicts run: forge mergetool")
+		fmt.Fprintln(os.Stderr, "Then: git add <files> && git commit")
+		os.Exit(c.ProcessState.ExitCode())
+	}
+	return nil
 }
 
 // ── forge merge-file ──────────────────────────────────────────────────────────
@@ -562,6 +1084,20 @@ func runMergeFile(_ *cobra.Command, args []string) error {
 	}
 
 	if ci != nil && len(ci.Conflicts) > 0 {
+		// Write structured sidecar so forge mergetool can drive interactive resolution.
+		format := "unknown"
+		if n, ok := h.(interface{ Format() string }); ok {
+			format = n.Format()
+		}
+		sidecar := handler.ConflictSidecar{
+			Handler:   format,
+			Conflicts: ci.Conflicts,
+			TheirsB64: base64.StdEncoding.EncodeToString(theirs),
+		}
+		if data, err := json.MarshalIndent(sidecar, "", "  "); err == nil {
+			_ = os.WriteFile(oursPath+".forge-conflict", data, 0644)
+		}
+
 		fmt.Fprintf(os.Stderr, "CONFLICT: %d conflict(s) in %s\n", len(ci.Conflicts), oursPath)
 		for _, c := range ci.Conflicts {
 			fmt.Fprintf(os.Stderr, "  %s\n", c.Path)
