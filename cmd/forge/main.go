@@ -199,6 +199,15 @@ func runStatus(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("not a git repository")
 	}
 
+	// Show current branch.
+	if head, err := r.Head(); err == nil {
+		if head.Name().IsBranch() {
+			fmt.Printf("On branch \x1b[1m%s\x1b[0m\n", head.Name().Short())
+		} else {
+			fmt.Printf("HEAD detached at %s\n", head.Hash().String()[:7])
+		}
+	}
+
 	wt, err := r.Worktree()
 	if err != nil {
 		return err
@@ -225,7 +234,21 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	for _, p := range paths {
 		fs := st[p]
 		label := handlerLabel(p, reg)
-		fmt.Printf("%c%c  %-45s %s\n", rune(fs.Staging), rune(fs.Worktree), p, label)
+		staged := rune(fs.Staging)
+		worktree := rune(fs.Worktree)
+
+		// Colour: green if staged, red if only unstaged, yellow if both.
+		var color string
+		switch {
+		case staged != ' ' && staged != '?' && worktree != ' ':
+			color = "\x1b[33m" // both staged and unstaged changes → yellow
+		case staged != ' ' && staged != '?':
+			color = "\x1b[32m" // staged only → green
+		default:
+			color = "\x1b[31m" // unstaged / untracked → red
+		}
+
+		fmt.Printf("%s%c%c  %-45s\x1b[0m %s\n", color, staged, worktree, p, label)
 	}
 	return nil
 }
