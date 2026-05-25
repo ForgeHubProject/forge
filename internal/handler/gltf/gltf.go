@@ -5,6 +5,7 @@ package gltf
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"math"
 	"path/filepath"
@@ -61,6 +62,8 @@ func (h *Handler) Merge(base, ours, theirs handler.Blob) (handler.Blob, *handler
 
 	docOurs.Nodes = mergeNodeList(docBase.Nodes, docOurs.Nodes, docTheirs.Nodes, &conflicts)
 	docOurs.Materials = mergeMaterialList(docBase.Materials, docOurs.Materials, docTheirs.Materials, &conflicts)
+	docOurs.Meshes = mergeMeshList(docBase.Meshes, docOurs.Meshes, docTheirs.Meshes, &conflicts)
+	docOurs.Animations = mergeAnimationList(docBase.Animations, docOurs.Animations, docTheirs.Animations, &conflicts)
 
 	result, err := encodeBlob(docOurs, isGLB(ours))
 	if err != nil {
@@ -400,6 +403,153 @@ func setRoughness(m *gltf.Material, v float64) {
 		m.PBRMetallicRoughness = &gltf.PBRMetallicRoughness{}
 	}
 	m.PBRMetallicRoughness.RoughnessFactor = &v
+}
+
+// ── merge: meshes ─────────────────────────────────────────────────────────────
+
+// mergeMeshList merges mesh arrays 3-way treating each mesh as an atomic unit.
+// Geometry data cannot be merged at the property level, so conflicting changes
+// to the same mesh are reported and ours is kept.
+func mergeMeshList(base, ours, theirs []*gltf.Mesh, conflicts *[]handler.SemanticConflict) []*gltf.Mesh {
+	baseMap, _ := meshMap(base)
+	oursMap, _ := meshMap(ours)
+	theirsMap, _ := meshMap(theirs)
+
+	seen := make(map[string]bool)
+	var names []string
+	for i, m := range ours {
+		k := meshName(m, i)
+		names = append(names, k)
+		seen[k] = true
+	}
+	for i, m := range theirs {
+		k := meshName(m, i)
+		if !seen[k] {
+			names = append(names, k)
+			seen[k] = true
+		}
+	}
+
+	var result []*gltf.Mesh
+	for _, name := range names {
+		bm := baseMap[name]
+		om, inOurs := oursMap[name]
+		tm, inTheirs := theirsMap[name]
+
+		switch {
+		case inOurs && inTheirs:
+			ourChanged := !jsonEqual(bm, om)
+			theirChanged := !jsonEqual(bm, tm)
+			switch {
+			case !ourChanged && theirChanged:
+				result = append(result, tm)
+			case ourChanged && theirChanged && !jsonEqual(om, tm):
+				*conflicts = append(*conflicts, handler.SemanticConflict{
+					Path:   "meshes." + name,
+					Ours:   fmt.Sprintf("%d primitives", len(om.Primitives)),
+					Theirs: fmt.Sprintf("%d primitives", len(tm.Primitives)),
+				})
+				result = append(result, om)
+			default:
+				result = append(result, om)
+			}
+		case inOurs && !inTheirs:
+			if bm != nil {
+				*conflicts = append(*conflicts, handler.SemanticConflict{
+					Path: "meshes." + name, Ours: "kept", Theirs: "removed",
+				})
+			}
+			result = append(result, om)
+		case !inOurs && inTheirs:
+			if bm != nil {
+				*conflicts = append(*conflicts, handler.SemanticConflict{
+					Path: "meshes." + name, Ours: "removed", Theirs: "kept",
+				})
+			} else {
+				result = append(result, tm)
+			}
+		}
+	}
+	return result
+}
+
+// ── merge: animations ─────────────────────────────────────────────────────────
+
+func mergeAnimationList(base, ours, theirs []*gltf.Animation, conflicts *[]handler.SemanticConflict) []*gltf.Animation {
+	baseMap, _ := animMap(base)
+	oursMap, _ := animMap(ours)
+	theirsMap, _ := animMap(theirs)
+
+	seen := make(map[string]bool)
+	var names []string
+	for i, a := range ours {
+		k := animName(a, i)
+		names = append(names, k)
+		seen[k] = true
+	}
+	for i, a := range theirs {
+		k := animName(a, i)
+		if !seen[k] {
+			names = append(names, k)
+			seen[k] = true
+		}
+	}
+
+	var result []*gltf.Animation
+	for _, name := range names {
+		ba := baseMap[name]
+		oa, inOurs := oursMap[name]
+		ta, inTheirs := theirsMap[name]
+
+		switch {
+		case inOurs && inTheirs:
+			ourChanged := !jsonEqual(ba, oa)
+			theirChanged := !jsonEqual(ba, ta)
+			switch {
+			case !ourChanged && theirChanged:
+				result = append(result, ta)
+			case ourChanged && theirChanged && !jsonEqual(oa, ta):
+				*conflicts = append(*conflicts, handler.SemanticConflict{
+					Path:   "animations." + name,
+					Ours:   fmt.Sprintf("%d channels", len(oa.Channels)),
+					Theirs: fmt.Sprintf("%d channels", len(ta.Channels)),
+				})
+				result = append(result, oa)
+			default:
+				result = append(result, oa)
+			}
+		case inOurs && !inTheirs:
+			if ba != nil {
+				*conflicts = append(*conflicts, handler.SemanticConflict{
+					Path: "animations." + name, Ours: "kept", Theirs: "removed",
+				})
+			}
+			result = append(result, oa)
+		case !inOurs && inTheirs:
+			if ba != nil {
+				*conflicts = append(*conflicts, handler.SemanticConflict{
+					Path: "animations." + name, Ours: "removed", Theirs: "kept",
+				})
+			} else {
+				result = append(result, ta)
+			}
+		}
+	}
+	return result
+}
+
+// jsonEqual reports whether a and b serialize to the same JSON. Used to detect
+// whether a mesh or animation changed between base and one of the merge sides.
+func jsonEqual(a, b any) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	aj, _ := json.Marshal(a)
+	bj, _ := json.Marshal(b)
+	return bytes.Equal(aj, bj)
 }
 
 // ── conflict resolution ───────────────────────────────────────────────────────
