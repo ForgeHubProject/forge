@@ -382,6 +382,10 @@ func runClone(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("clone failed: %w", err)
 	}
 
+	if err := setupGitMergeDriver(dir); err != nil {
+		fmt.Fprintf(os.Stderr, "forge: warning: could not configure git merge driver: %v\n", err)
+	}
+
 	reportMissingHandlers(dir)
 	return nil
 }
