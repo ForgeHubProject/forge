@@ -231,25 +231,83 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	}
 	sort.Strings(paths)
 
+	// Partition into three buckets (a file can appear in staged AND unstaged).
+	var stagedPaths, unstagedPaths, untrackedPaths []string
 	for _, p := range paths {
 		fs := st[p]
-		label := handlerLabel(p, reg)
-		staged := rune(fs.Staging)
-		worktree := rune(fs.Worktree)
-
-		// Colour: green if staged, red if only unstaged, yellow if both.
-		var color string
-		switch {
-		case staged != ' ' && staged != '?' && worktree != ' ':
-			color = "\x1b[33m" // both staged and unstaged changes → yellow
-		case staged != ' ' && staged != '?':
-			color = "\x1b[32m" // staged only → green
-		default:
-			color = "\x1b[31m" // unstaged / untracked → red
+		s, w := rune(fs.Staging), rune(fs.Worktree)
+		if s == '?' && w == '?' {
+			untrackedPaths = append(untrackedPaths, p)
+			continue
 		}
-
-		fmt.Printf("%s%c%c  %-45s\x1b[0m %s\n", color, staged, worktree, p, label)
+		if s != ' ' && s != '?' {
+			stagedPaths = append(stagedPaths, p)
+		}
+		if w != ' ' && w != '?' {
+			unstagedPaths = append(unstagedPaths, p)
+		}
 	}
+
+	statusWord := func(code rune) string {
+		switch code {
+		case 'A':
+			return "new file:  "
+		case 'D':
+			return "deleted:   "
+		case 'R':
+			return "renamed:   "
+		case 'C':
+			return "copied:    "
+		default:
+			return "modified:  "
+		}
+	}
+
+	printStagedEntry := func(p string) {
+		label := handlerLabel(p, reg)
+		word := statusWord(rune(st[p].Staging))
+		fmt.Printf("\x1b[32m\t%s%-38s\x1b[0m %s\n", word, p, label)
+	}
+
+	printUnstagedEntry := func(p string) {
+		label := handlerLabel(p, reg)
+		word := statusWord(rune(st[p].Worktree))
+		fmt.Printf("\x1b[31m\t%s%-38s\x1b[0m %s\n", word, p, label)
+	}
+
+	printUntrackedEntry := func(p string) {
+		label := handlerLabel(p, reg)
+		fmt.Printf("\x1b[31m\t%-49s\x1b[0m %s\n", p, label)
+	}
+
+	if len(stagedPaths) > 0 {
+		fmt.Println("Changes to be committed:")
+		fmt.Println("  \x1b[2m(use \"forge restore --staged <file>...\" to unstage)\x1b[0m")
+		for _, p := range stagedPaths {
+			printStagedEntry(p)
+		}
+		fmt.Println()
+	}
+
+	if len(unstagedPaths) > 0 {
+		fmt.Println("Changes not staged for commit:")
+		fmt.Println("  \x1b[2m(use \"forge add <file>...\" to update what will be committed)\x1b[0m")
+		fmt.Println("  \x1b[2m(use \"forge restore <file>...\" to discard changes in working directory)\x1b[0m")
+		for _, p := range unstagedPaths {
+			printUnstagedEntry(p)
+		}
+		fmt.Println()
+	}
+
+	if len(untrackedPaths) > 0 {
+		fmt.Println("Untracked files:")
+		fmt.Println("  \x1b[2m(use \"forge add <file>...\" to include in what will be committed)\x1b[0m")
+		for _, p := range untrackedPaths {
+			printUntrackedEntry(p)
+		}
+		fmt.Println()
+	}
+
 	return nil
 }
 
