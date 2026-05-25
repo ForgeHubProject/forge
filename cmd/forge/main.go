@@ -100,29 +100,6 @@ func runInit(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("init failed: %w", err)
 	}
 
-	forgeDir := filepath.Join(dir, ".forge")
-	if err := os.MkdirAll(forgeDir, 0755); err != nil {
-		return fmt.Errorf("creating .forge/: %w", err)
-	}
-
-	handlersPath := filepath.Join(forgeDir, "handlers")
-	if _, err := os.Stat(handlersPath); os.IsNotExist(err) {
-		template := "# .forge/handlers\n" +
-			"# Declare which domains this repository requires.\n" +
-			"# Official domains (3d, image, text, audio, video) ship with Forge.\n" +
-			"# Community domains need a registry entry.\n" +
-			"#\n" +
-			"# [domains]\n" +
-			"# require = [\"3d\", \"image\"]\n" +
-			"#\n" +
-			"# [community.audio]\n" +
-			"# registry = \"https://forge-audio.example.com\"\n" +
-			"# version  = \"1.0.0\"\n"
-		if err := os.WriteFile(handlersPath, []byte(template), 0644); err != nil {
-			return fmt.Errorf("creating .forge/handlers: %w", err)
-		}
-	}
-
 	if err := setupGitMergeDriver(dir); err != nil {
 		fmt.Fprintf(os.Stderr, "forge: warning: could not configure git merge driver: %v\n", err)
 	}
