@@ -190,31 +190,123 @@ The goal is quality over breadth — if a format is widely used and well-specifi
 
 ### Community handlers
 
-Forge doesn't try to maintain handlers for every format in existence. Instead, the community builds and distributes its own handlers via independent registries. Forge discovers them the same way package managers discover repositories: a `sources.list` file that lists trusted registry URLs.
+Forge doesn't try to maintain handlers for every format in existence. Instead, the community builds and distributes its own handlers via independent registries — the same model as apt's `sources.list` or Homebrew taps.
 
+Handlers can be written in **any language**. The only requirement is that the binary implements the forge handler subprocess protocol over stdin/stdout (see below). A Houdini studio could ship a `.hip` handler in Python. An audio middleware vendor could ship a `.bnk` handler in Rust. Forge doesn't care.
+
+---
+
+## Handler Plugin System
+
+### How it works
+
+External handlers are standalone executables named `forge-handler-<name>`. Forge discovers them in this order:
+
+1. `~/.forge/plugins/` (installed via `forge handler install`)
+2. Anywhere on `$PATH`
+3. Built-in handlers compiled into the forge binary (text, gltf — always available)
+
+This means a developer can drop any executable named `forge-handler-blend` onto their PATH and forge will use it immediately for `.blend` files — no configuration required.
+
+### Subprocess protocol
+
+Forge communicates with external handlers via stdin/stdout JSON. Every handler binary must support these subcommands:
+
+**`forge-handler-<name> match <filepath>`**
 ```
-# ~/.forge/sources.list
-https://handlers.blendercommunity.org
-https://forge-handlers.nvidia.com
-https://forge.acmestudio.internal/handlers
+stdout: "true" or "false"
+exit 0 always
 ```
 
-Users opt in to a registry explicitly. Forge makes no guarantees about handlers sourced from outside the official tier — trust is delegated to the user and the registry maintainer.
+**`forge-handler-<name> diff`**
+```
+stdin:  { "base": "<base64>", "head": "<base64>" }
+stdout: StructuredDiff JSON
+exit 0 on success, 1 on error
+```
 
-### Per-repo handler manifest
+**`forge-handler-<name> merge`**
+```
+stdin:  { "base": "<base64>", "ours": "<base64>", "theirs": "<base64>" }
+stdout: { "blob": "<base64>", "conflicts": [ SemanticConflict, … ] }
+        conflicts may be omitted or empty for a clean merge
+exit 0 on success, 1 on error
+```
 
-A `.forge/handlers` file in the repo root declares which handlers the repo depends on and where to find them. This travels with the repo so collaborators know what they need upfront.
+**`forge-handler-<name> info`** (optional, for registry display)
+```
+stdout: { "name": "gltf", "version": "1.2.0", "formats": [".glb", ".gltf"] }
+```
+
+Binary blobs are base64-encoded to keep the transport pure JSON. For very large files, a future protocol version may switch to a length-prefixed binary framing — the `info` response includes a `protocol` version field for forward compatibility.
+
+Handlers that cannot implement `merge` return `exit 1` with `{ "error": "not supported" }`. Forge falls back to "pick a side", the same as plain git today. `diff` alone is already a massive improvement over "Binary files differ."
+
+### Registry design
+
+**Global registries** (`~/.forge/registries`) — per-machine, like `sources.list`:
 
 ```toml
-# .forge/handlers
-[require]
-"*.blend" = { registry = "https://handlers.blendercommunity.org", handler = "blender/blend-handler", version = "1.2.0" }
-"*.ptex"  = { registry = "https://forge-handlers.nvidia.com",     handler = "nvidia/ptex-handler",   version = "0.9.1" }
+# Official forge registry — present by default
+[registry.official]
+url = "https://registry.forgectl.io"
+
+# Additional community or private registries
+[registry.blender]
+url = "https://handlers.blendercommunity.org"
+
+[registry.studio]
+url = "https://forge.acmestudio.internal/handlers"
 ```
 
-When a handler listed in `.forge/handlers` is not installed locally, Forge reports it clearly and suggests where to get it, rather than silently degrading.
+Users opt in to registries explicitly. Forge makes no guarantees about handlers sourced from outside the official tier — trust is delegated to the user and the registry maintainer.
 
-See [docs/handler-ecosystem.md](docs/handler-ecosystem.md) for the full ecosystem design.
+**Per-repo manifest** (`.forge/handlers`) — travels with the repo:
+
+```toml
+[domains]
+require = ["3d"]
+
+[handler.gltf]
+version = "1.2.0"
+# no registry = use first match across configured registries
+
+[handler.blend]
+version = "0.8.0"
+registry = "blender"
+
+[handler.hip]
+version = "2.1.0"
+registry = "studio"
+```
+
+When a handler listed in `.forge/handlers` is not installed locally, Forge reports it clearly at `forge clone` / `forge status` time and suggests `forge handler install` to resolve it, rather than silently degrading.
+
+**Registry index format** — a registry is just an HTTP endpoint serving a JSON index. No server infrastructure required; a GitHub repo with a `registry.json` file and release assets is sufficient:
+
+```json
+{
+  "handlers": {
+    "gltf": {
+      "1.2.0": {
+        "linux-amd64":   "https://github.com/…/releases/download/v1.2.0/forge-handler-gltf_linux-amd64",
+        "darwin-arm64":  "https://github.com/…/releases/download/v1.2.0/forge-handler-gltf_darwin-arm64",
+        "windows-amd64": "https://github.com/…/releases/download/v1.2.0/forge-handler-gltf_windows-amd64.exe"
+      }
+    }
+  }
+}
+```
+
+### Writing a handler
+
+Any language that can read stdin, write stdout, and exit with a status code can implement a handler. The SDK (M4) will publish:
+
+- The JSON schema for the subprocess protocol
+- A Go reference implementation (`forge-handler-gltf` as the canonical example)
+- A starter template repo (fork-and-implement)
+
+A minimal handler in any language needs fewer than 100 lines: parse the subcommand, read JSON from stdin, process the blobs, write JSON to stdout.
 
 ---
 
@@ -262,13 +354,17 @@ A glTF handler in the CLI produces a `StructuredDiff`. ForgeHub's `GltfDiffViewe
 - [ ] Conflict-by-conflict interactive prompt in `forge mergetool` for binary formats — pick `[c]urrent` or `[i]ncoming` per property; forge re-serializes a valid output file from the choices
 - [ ] ForgeHub conflict resolution UI for glTF
 
-### M4 — Community SDK
-- [ ] Published `ForgeHandler` interface as a standalone package
-- [ ] `sources.list` registry discovery (`forge handler sources add <url>`)
-- [ ] Per-repo `.forge/handlers` manifest with registry pinning
-- [ ] `forge handler install` / `forge handler list` / `forge handler sources`
-- [ ] Documentation and example handler template
-- [ ] `ConflictRenderer` interface shipped as part of the standalone SDK — handlers opt in to provide format-aware conflict display
+### M4 — Handler Plugin System
+- [ ] Subprocess protocol spec (stdin/stdout JSON: `match`, `diff`, `merge`, `info`)
+- [ ] Forge discovers and calls `forge-handler-<name>` binaries from `~/.forge/plugins/` and `$PATH`
+- [ ] `forge handler install <name>` — fetches binary from registry for current OS/arch
+- [ ] `forge handler list` — shows installed handlers and versions
+- [ ] `forge handler sources add/remove/list` — manages `~/.forge/registries`
+- [ ] Official registry index hosted as a GitHub repo (`registry.json` + release assets)
+- [ ] Per-repo `.forge/handlers` manifest read by forge at runtime (activates only declared domains/handlers)
+- [ ] `forge clone` warns about missing handlers and suggests `forge handler install`
+- [ ] SDK: published subprocess protocol JSON schema + Go reference implementation + starter template repo
+- [ ] `ConflictRenderer` interface included in the protocol spec — handlers opt in to provide format-aware conflict display inside `forge mergetool`
 
 ### M5 — forge mergetool TUI
 - [ ] 3-pane terminal UI (`bubbletea` + `lipgloss`): current | merged preview | incoming
@@ -290,8 +386,8 @@ libgit2 is MIT licensed and exposes the full git object model as a C library wit
 **Wire format: JSON for StructuredDiff**  
 Human-readable, language-agnostic, easy to render in web UIs (ForgeHub). Handlers can embed binary data (base64) for thumbnails or preview frames.
 
-**Handler loading: plugins via shared library or subprocess**  
-Handlers can be compiled into Forge (built-in) or loaded as external processes via a simple stdin/stdout protocol — same pattern as LSP. This allows community handlers in any language.
+**Handler loading: subprocess model**  
+External handlers are standalone executables (`forge-handler-<name>`) that communicate with forge over stdin/stdout JSON — the same pattern as LSP and Terraform providers. This means handlers can be written in any language, independently versioned, and distributed via registries without recompiling forge. Built-in handlers (text, gltf) remain compiled into the forge binary as the always-available baseline. Go's `plugin` package was considered and rejected: it only works on Linux/macOS and requires an identical Go toolchain version, making distribution impractical.
 
 ---
 
