@@ -20,7 +20,7 @@ func (h *Handler) Format() string { return "text" }
 
 func (h *Handler) Diff(base, head handler.Blob) (handler.StructuredDiff, error) {
 	dmp := diffmatchpatch.New()
-	baseChars, headChars, lines := dmp.DiffLinesToChars(string(base), string(head))
+	baseChars, headChars, lines := dmp.DiffLinesToChars(normalizeLF(string(base)), normalizeLF(string(head)))
 	diffs := dmp.DiffMain(baseChars, headChars, false)
 	diffs = dmp.DiffCharsToLines(diffs, lines)
 
@@ -81,6 +81,10 @@ func (h *Handler) Merge(base, ours, theirs handler.Blob) (handler.Blob, *handler
 		return result, nil, nil
 	}
 	return result, &handler.ConflictInfo{Conflicts: conflicts}, nil
+}
+
+func normalizeLF(s string) string {
+	return strings.ReplaceAll(s, "\r\n", "\n")
 }
 
 func splitLines(s string) []string {

@@ -48,6 +48,18 @@ func rootCmd() *cobra.Command {
 		logCmd(),
 		pushCmd(),
 		pullCmd(),
+		gitPassthrough("add", "Stage file contents (delegates to git)"),
+		gitPassthrough("commit", "Record staged changes (delegates to git)"),
+		gitPassthrough("branch", "List, create or delete branches (delegates to git)"),
+		gitPassthrough("checkout", "Switch branches or restore files (delegates to git)"),
+		gitPassthrough("switch", "Switch branches (delegates to git)"),
+		gitPassthrough("fetch", "Download objects and refs from remote (delegates to git)"),
+		gitPassthrough("stash", "Stash working tree changes (delegates to git)"),
+		gitPassthrough("reset", "Reset HEAD or working tree (delegates to git)"),
+		gitPassthrough("restore", "Restore working tree files (delegates to git)"),
+		gitPassthrough("rebase", "Reapply commits on top of another branch (delegates to git)"),
+		gitPassthrough("tag", "Create, list or delete tags (delegates to git)"),
+		gitPassthrough("remote", "Manage remote connections (delegates to git)"),
 	)
 	return root
 }
@@ -187,6 +199,15 @@ func runStatus(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("not a git repository")
 	}
 
+	// Show current branch.
+	if head, err := r.Head(); err == nil {
+		if head.Name().IsBranch() {
+			fmt.Printf("On branch \x1b[1m%s\x1b[0m\n", head.Name().Short())
+		} else {
+			fmt.Printf("HEAD detached at %s\n", head.Hash().String()[:7])
+		}
+	}
+
 	wt, err := r.Worktree()
 	if err != nil {
 		return err
@@ -210,11 +231,83 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	}
 	sort.Strings(paths)
 
+	// Partition into three buckets (a file can appear in staged AND unstaged).
+	var stagedPaths, unstagedPaths, untrackedPaths []string
 	for _, p := range paths {
 		fs := st[p]
-		label := handlerLabel(p, reg)
-		fmt.Printf("%c%c  %-45s %s\n", rune(fs.Staging), rune(fs.Worktree), p, label)
+		s, w := rune(fs.Staging), rune(fs.Worktree)
+		if s == '?' && w == '?' {
+			untrackedPaths = append(untrackedPaths, p)
+			continue
+		}
+		if s != ' ' && s != '?' {
+			stagedPaths = append(stagedPaths, p)
+		}
+		if w != ' ' && w != '?' {
+			unstagedPaths = append(unstagedPaths, p)
+		}
 	}
+
+	statusWord := func(code rune) string {
+		switch code {
+		case 'A':
+			return "new file:  "
+		case 'D':
+			return "deleted:   "
+		case 'R':
+			return "renamed:   "
+		case 'C':
+			return "copied:    "
+		default:
+			return "modified:  "
+		}
+	}
+
+	printStagedEntry := func(p string) {
+		label := handlerLabel(p, reg)
+		word := statusWord(rune(st[p].Staging))
+		fmt.Printf("\x1b[32m\t%s%-38s\x1b[0m %s\n", word, p, label)
+	}
+
+	printUnstagedEntry := func(p string) {
+		label := handlerLabel(p, reg)
+		word := statusWord(rune(st[p].Worktree))
+		fmt.Printf("\x1b[31m\t%s%-38s\x1b[0m %s\n", word, p, label)
+	}
+
+	printUntrackedEntry := func(p string) {
+		label := handlerLabel(p, reg)
+		fmt.Printf("\x1b[31m\t%-49s\x1b[0m %s\n", p, label)
+	}
+
+	if len(stagedPaths) > 0 {
+		fmt.Println("Changes to be committed:")
+		fmt.Println("  \x1b[2m(use \"forge restore --staged <file>...\" to unstage)\x1b[0m")
+		for _, p := range stagedPaths {
+			printStagedEntry(p)
+		}
+		fmt.Println()
+	}
+
+	if len(unstagedPaths) > 0 {
+		fmt.Println("Changes not staged for commit:")
+		fmt.Println("  \x1b[2m(use \"forge add <file>...\" to update what will be committed)\x1b[0m")
+		fmt.Println("  \x1b[2m(use \"forge restore <file>...\" to discard changes in working directory)\x1b[0m")
+		for _, p := range unstagedPaths {
+			printUnstagedEntry(p)
+		}
+		fmt.Println()
+	}
+
+	if len(untrackedPaths) > 0 {
+		fmt.Println("Untracked files:")
+		fmt.Println("  \x1b[2m(use \"forge add <file>...\" to include in what will be committed)\x1b[0m")
+		for _, p := range untrackedPaths {
+			printUntrackedEntry(p)
+		}
+		fmt.Println()
+	}
+
 	return nil
 }
 
@@ -451,7 +544,7 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	reg := defaultRegistry()
 
 	if len(args) == 1 {
-		return diffFile(repo, reg, args[0])
+		return diffFile(repo, reg, cleanPath(args[0]))
 	}
 
 	// No file given: diff all changed files.
@@ -471,11 +564,28 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// cleanPath normalises a user-supplied file path for use with go-git and git
+// commands. It removes leading ./ and .\ (common from PowerShell tab-completion)
+// and converts backslashes to forward slashes.
+func cleanPath(p string) string {
+	return filepath.ToSlash(filepath.Clean(p))
+}
+
 func diffFile(repo *gitrepo.Repo, reg *handler.Registry, path string) error {
+	path = cleanPath(path)
 	h, err := reg.Resolve(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "forge: %v\n", err)
-		return nil // degrade gracefully, don't abort
+		return nil
+	}
+
+	// Text files: delegate to git diff for familiar unified-diff output.
+	if n, ok := h.(interface{ Format() string }); ok && n.Format() == "text" {
+		c := exec.Command("git", "diff", "HEAD", "--", path)
+		c.Stdout = os.Stdout
+		c.Stderr = os.Stderr
+		_ = c.Run()
+		return nil
 	}
 
 	base, err := repo.BlobAtHEAD(filepath.ToSlash(path))
@@ -1053,7 +1163,7 @@ written into OURS so you can inspect and resolve them).`,
 }
 
 func runMergeFile(_ *cobra.Command, args []string) error {
-	basePath, oursPath, theirsPath := args[0], args[1], args[2]
+	basePath, oursPath, theirsPath := cleanPath(args[0]), cleanPath(args[1]), cleanPath(args[2])
 
 	base, err := os.ReadFile(basePath)
 	if err != nil {
@@ -1111,50 +1221,47 @@ func runMergeFile(_ *cobra.Command, args []string) error {
 
 // ── forge log ─────────────────────────────────────────────────────────────────
 
-func logCmd() *cobra.Command {
+// ── git pass-throughs ─────────────────────────────────────────────────────────
+// gitPassthrough returns a cobra.Command that forwards all arguments verbatim
+// to the equivalent git sub-command. DisableFlagParsing lets flags like
+// --oneline or -m pass through without cobra trying to interpret them.
+
+func gitPassthrough(name, short string) *cobra.Command {
 	return &cobra.Command{
-		Use:   "log",
-		Short: "Show commit log with format-aware metadata (M2)",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return fmt.Errorf("forge log is not yet implemented (planned for M2)")
+		Use:                name,
+		Short:              short,
+		DisableFlagParsing: true,
+		RunE: func(_ *cobra.Command, args []string) error {
+			c := exec.Command("git", append([]string{name}, args...)...)
+			c.Stdin = os.Stdin
+			c.Stdout = os.Stdout
+			c.Stderr = os.Stderr
+			return c.Run()
 		},
 	}
+}
+
+func logCmd() *cobra.Command {
+	return gitPassthrough("log", "Show commit log (delegates to git)")
 }
 
 // ── forge push / pull ─────────────────────────────────────────────────────────
 
 func pushCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:                "push",
-		Short:              "Push to remote (delegates to git)",
-		DisableFlagParsing: true,
-		RunE:               delegateToGit("push"),
-	}
+	return gitPassthrough("push", "Push to remote (delegates to git)")
 }
 
 func pullCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:                "pull",
-		Short:              "Pull from remote (delegates to git)",
-		DisableFlagParsing: true,
-		RunE:               delegateToGit("pull"),
-	}
+	return gitPassthrough("pull", "Pull from remote (delegates to git)")
 }
 
 func delegateToGit(sub string) func(*cobra.Command, []string) error {
-	return func(cmd *cobra.Command, args []string) error {
-		argv := append([]string{sub}, args...)
-		proc, err := os.StartProcess("/usr/bin/git", append([]string{"git"}, argv...), &os.ProcAttr{
-			Files: []*os.File{os.Stdin, os.Stdout, os.Stderr},
-		})
-		if err != nil {
-			return fmt.Errorf("could not start git: %w", err)
-		}
-		state, err := proc.Wait()
-		if err != nil {
-			return err
-		}
-		os.Exit(state.ExitCode())
-		return nil
+	return func(_ *cobra.Command, args []string) error {
+		c := exec.Command("git", append([]string{sub}, args...)...)
+		c.Stdin = os.Stdin
+		c.Stdout = os.Stdout
+		c.Stderr = os.Stderr
+		return c.Run()
 	}
 }
+
