@@ -175,6 +175,39 @@ func setupGitMergeDriver(repoDir string) error {
 		fmt.Fprintf(f, "\n[merge \"forge\"]\n\tname = Forge semantic merge\n\tdriver = forge merge-file %%O %%A %%B\n")
 		f.Close()
 	}
+
+	// .gitignore — add safety-net entries for git mergetool temp files and
+	// vim swap files so they never accidentally get staged.
+	ignorePath := filepath.Join(repoDir, ".gitignore")
+	ignoreExisting, _ := os.ReadFile(ignorePath)
+	ignoreEntries := []string{
+		"*.swp",
+		"*_BASE_*.glb",
+		"*_LOCAL_*.glb",
+		"*_REMOTE_*.glb",
+		"*_BACKUP_*.glb",
+	}
+	var ignoreToAdd []string
+	for _, e := range ignoreEntries {
+		if !bytes.Contains(ignoreExisting, []byte(e)) {
+			ignoreToAdd = append(ignoreToAdd, e)
+		}
+	}
+	if len(ignoreToAdd) > 0 {
+		f, err := os.OpenFile(ignorePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return err
+		}
+		if len(ignoreExisting) > 0 && !bytes.HasSuffix(ignoreExisting, []byte("\n")) {
+			fmt.Fprintln(f)
+		}
+		fmt.Fprintln(f, "# Forge / git mergetool temp files")
+		for _, e := range ignoreToAdd {
+			fmt.Fprintln(f, e)
+		}
+		f.Close()
+	}
+
 	return nil
 }
 
@@ -869,7 +902,11 @@ func resolveInteractive(path string, h handler.ForgeHandler) bool {
 			fmt.Printf("  %s\n    current:  %v\n    incoming: %v\n", c.Path, c.Ours, c.Theirs)
 		}
 		fmt.Printf("Resolve in your DCC tool and re-export, then 'git add %s'.\n", path)
-		return promptConfirm(fmt.Sprintf("Mark %s as resolved?", path))
+		resolved := promptConfirm(fmt.Sprintf("Mark %s as resolved?", path))
+		if resolved {
+			cleanupMergeTempFiles(path)
+		}
+		return resolved
 	}
 
 	n := len(sc.Conflicts)
@@ -961,8 +998,25 @@ func applyConflictChoices(path, sidecarPath string, sc handler.ConflictSidecar, 
 		return false
 	}
 	_ = os.Remove(sidecarPath)
+	cleanupMergeTempFiles(path)
 	fmt.Printf("%s: resolved.\n", path)
 	return true
+}
+
+// cleanupMergeTempFiles removes the _BASE_PID, _LOCAL_PID, _REMOTE_PID, and
+// _BACKUP_PID temp files that git's merge driver infrastructure leaves in the
+// working directory when a merge driver exits with a non-zero status.
+func cleanupMergeTempFiles(path string) {
+	dir := filepath.Dir(path)
+	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	ext := filepath.Ext(path)
+	for _, tag := range []string{"_BASE_", "_LOCAL_", "_REMOTE_", "_BACKUP_"} {
+		pattern := filepath.Join(dir, base+tag+"*"+ext)
+		matches, _ := filepath.Glob(pattern)
+		for _, m := range matches {
+			os.Remove(m)
+		}
+	}
 }
 
 func promptConfirm(prompt string) bool {
