@@ -322,3 +322,94 @@ func TestApplyChoices_TakeTheirsRemovedNode(t *testing.T) {
 		t.Errorf("expected 1 node after removing Lamp, got %d", len(doc.Nodes))
 	}
 }
+
+// ── mesh merge tests ──────────────────────────────────────────────────────────
+
+func minDocWithMeshes(meshes []any) []byte {
+	doc := map[string]any{
+		"asset":  map[string]any{"version": "2.0"},
+		"meshes": meshes,
+	}
+	b, _ := json.Marshal(doc)
+	return b
+}
+
+func mesh(name string, primCount int) map[string]any {
+	prims := make([]any, primCount)
+	for i := range prims {
+		prims[i] = map[string]any{}
+	}
+	return map[string]any{"name": name, "primitives": prims}
+}
+
+func TestMergeMesh_TheirsAddsMesh(t *testing.T) {
+	base := minDocWithMeshes([]any{mesh("Body", 1)})
+	ours := minDocWithMeshes([]any{mesh("Body", 1)})
+	theirs := minDocWithMeshes([]any{mesh("Body", 1), mesh("Wheel", 2)})
+
+	_, ci, err := New().Merge(base, ours, theirs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ci != nil {
+		t.Errorf("expected clean merge, got conflicts: %v", ci.Conflicts)
+	}
+	doc, _ := parseDoc(minDocWithMeshes([]any{mesh("Body", 1), mesh("Wheel", 2)}))
+	result, _, _ := New().Merge(base, ours, theirs)
+	merged, _ := parseDoc(result)
+	if len(merged.Meshes) != len(doc.Meshes) {
+		t.Errorf("expected %d meshes, got %d", len(doc.Meshes), len(merged.Meshes))
+	}
+}
+
+func TestMergeMesh_BothChangeSameMesh_Conflict(t *testing.T) {
+	base := minDocWithMeshes([]any{mesh("Body", 1)})
+	ours := minDocWithMeshes([]any{mesh("Body", 2)}) // ours changed primitives
+	theirs := minDocWithMeshes([]any{mesh("Body", 3)}) // theirs changed differently
+
+	_, ci, err := New().Merge(base, ours, theirs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ci == nil || len(ci.Conflicts) == 0 {
+		t.Fatal("expected conflict for divergent mesh changes")
+	}
+	if ci.Conflicts[0].Path != "meshes.Body" {
+		t.Errorf("unexpected conflict path: %s", ci.Conflicts[0].Path)
+	}
+}
+
+func TestMergeMesh_OnlyTheirsChangesMesh_Clean(t *testing.T) {
+	base := minDocWithMeshes([]any{mesh("Body", 1)})
+	ours := minDocWithMeshes([]any{mesh("Body", 1)})   // ours unchanged
+	theirs := minDocWithMeshes([]any{mesh("Body", 3)}) // theirs changed
+
+	result, ci, err := New().Merge(base, ours, theirs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ci != nil {
+		t.Errorf("expected clean merge, got conflicts: %v", ci.Conflicts)
+	}
+	merged, _ := parseDoc(result)
+	if len(merged.Meshes[0].Primitives) != 3 {
+		t.Errorf("expected theirs' 3 primitives, got %d", len(merged.Meshes[0].Primitives))
+	}
+}
+
+func TestMergeMesh_TheirsRemovesMesh_Conflict(t *testing.T) {
+	base := minDocWithMeshes([]any{mesh("Body", 1), mesh("Wheel", 2)})
+	ours := minDocWithMeshes([]any{mesh("Body", 1), mesh("Wheel", 2)}) // kept both
+	theirs := minDocWithMeshes([]any{mesh("Body", 1)})                 // removed Wheel
+
+	_, ci, err := New().Merge(base, ours, theirs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ci == nil || len(ci.Conflicts) == 0 {
+		t.Fatal("expected conflict for remove-vs-keep")
+	}
+	if ci.Conflicts[0].Path != "meshes.Wheel" {
+		t.Errorf("unexpected conflict path: %s", ci.Conflicts[0].Path)
+	}
+}
