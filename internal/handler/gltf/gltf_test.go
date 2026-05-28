@@ -77,7 +77,7 @@ func TestDiff_NodeTranslation(t *testing.T) {
 	if len(props) != 1 || props[0].Label != "translation" {
 		t.Fatalf("expected translation property, got %v", props)
 	}
-	if props[0].Before != "[0 0 0]" || props[0].After != "[0 1.8 0]" {
+	if props[0].Before != "x=0 y=0 z=0" || props[0].After != "x=0 y=1.8 z=0" {
 		t.Errorf("unexpected values: %v → %v", props[0].Before, props[0].After)
 	}
 }
