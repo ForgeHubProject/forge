@@ -160,7 +160,7 @@ func merge3Node(bn, on, tn *gltf.Node, name string, conflicts *[]handler.Semanti
 		} else {
 			*conflicts = append(*conflicts, handler.SemanticConflict{
 				Path: "nodes." + name + ".translation",
-				Ours: fmtVec3(ourTr), Theirs: fmtVec3(theirTr),
+				Ours: fmtVec3(blenderTranslation(ourTr)), Theirs: fmtVec3(blenderTranslation(theirTr)),
 			})
 		}
 	} else if nearEq3(ourTr, baseTr) && !nearEq3(theirTr, baseTr) {
@@ -188,7 +188,7 @@ func merge3Node(bn, on, tn *gltf.Node, name string, conflicts *[]handler.Semanti
 		} else {
 			*conflicts = append(*conflicts, handler.SemanticConflict{
 				Path: "nodes." + name + ".scale",
-				Ours: fmtVec3(ourSc), Theirs: fmtVec3(theirSc),
+				Ours: fmtVec3(blenderScale(ourSc)), Theirs: fmtVec3(blenderScale(theirSc)),
 			})
 		}
 	} else if nearEq3(ourSc, baseSc) && !nearEq3(theirSc, baseSc) {
@@ -822,7 +822,7 @@ func diffNodeProps(a, b *gltf.Node) []handler.DiffChange {
 	if ta, tb := a.TranslationOrDefault(), b.TranslationOrDefault(); !nearEq3(ta, tb) {
 		changes = append(changes, handler.DiffChange{
 			Path: "translation", Label: "translation",
-			Kind: handler.Modified, Before: fmtVec3(ta), After: fmtVec3(tb),
+			Kind: handler.Modified, Before: fmtVec3(blenderTranslation(ta)), After: fmtVec3(blenderTranslation(tb)),
 		})
 	}
 
@@ -836,7 +836,7 @@ func diffNodeProps(a, b *gltf.Node) []handler.DiffChange {
 	if sa, sb := a.ScaleOrDefault(), b.ScaleOrDefault(); !nearEq3(sa, sb) {
 		changes = append(changes, handler.DiffChange{
 			Path: "scale", Label: "scale",
-			Kind: handler.Modified, Before: fmtVec3(sa), After: fmtVec3(sb),
+			Kind: handler.Modified, Before: fmtVec3(blenderScale(sa)), After: fmtVec3(blenderScale(sb)),
 		})
 	}
 
@@ -1192,11 +1192,29 @@ func quatToEulerXYZ(q [4]float64) [3]float64 {
 	return [3]float64{x, y, z}
 }
 
-// fmtRot formats a quaternion as human-readable XYZ Euler degrees.
+// blenderTranslation converts a glTF XYZ translation to Blender's coordinate
+// space so the diff output matches what the artist sees in their DCC tool.
+// Blender X = glTF X,  Blender Y = −glTF Z,  Blender Z = glTF Y
+func blenderTranslation(v [3]float64) [3]float64 {
+	y := -v[2]
+	if y == 0 {
+		y = 0 // avoid -0 from IEEE 754 negation
+	}
+	return [3]float64{v[0], y, v[1]}
+}
+
+// blenderScale converts a glTF XYZ scale to Blender's coordinate space.
+// Blender X = glTF X,  Blender Y = glTF Z,  Blender Z = glTF Y
+func blenderScale(v [3]float64) [3]float64 { return [3]float64{v[0], v[2], v[1]} }
+
+// fmtRot formats a quaternion as human-readable Euler degrees in Blender space.
+// glTF Euler XYZ → Blender Euler: X=X, Y=Z, Z=Y
 func fmtRot(q [4]float64) string {
 	e := quatToEulerXYZ(q)
-	return fmt.Sprintf("(%s° %s° %s°)", fmtF(e[0]), fmtF(e[1]), fmtF(e[2]))
+	b := [3]float64{e[0], e[2], e[1]}
+	return fmt.Sprintf("(%s° %s° %s°)", fmtF(b[0]), fmtF(b[1]), fmtF(b[2]))
 }
+
 func fmtF(v float64) string {
 	return strconv.FormatFloat(v, 'f', -1, 32)
 }
