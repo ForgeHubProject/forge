@@ -1209,10 +1209,11 @@ func blenderScale(v [3]float64) [3]float64 { return [3]float64{v[0], v[2], v[1]}
 
 // fmtRot formats a quaternion as human-readable Euler degrees in Blender space.
 // glTF Euler XYZ → Blender Euler: X=X, Y=Z, Z=Y
+// Degrees are rounded to 2 decimal places — matches Blender's own precision.
 func fmtRot(q [4]float64) string {
 	e := quatToEulerXYZ(q)
 	b := [3]float64{e[0], e[2], e[1]}
-	return fmt.Sprintf("(%s° %s° %s°)", fmtF(b[0]), fmtF(b[1]), fmtF(b[2]))
+	return fmt.Sprintf("(%.2f° %.2f° %.2f°)", b[0], b[1], b[2])
 }
 
 func fmtF(v float64) string {
