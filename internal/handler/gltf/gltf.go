@@ -1195,18 +1195,18 @@ func quatToEulerXYZ(q [4]float64) [3]float64 {
 // fmtRot formats a quaternion as human-readable XYZ Euler degrees.
 func fmtRot(q [4]float64) string {
 	e := quatToEulerXYZ(q)
-	return fmt.Sprintf("(%s° %s° %s°)", fmtF(e[0]), fmtF(e[1]), fmtF(e[2]))
+	return fmt.Sprintf("x=%s° y=%s° z=%s°", fmtF(e[0]), fmtF(e[1]), fmtF(e[2]))
 }
 func fmtF(v float64) string {
 	return strconv.FormatFloat(v, 'f', -1, 32)
 }
 
 func fmtVec3(v [3]float64) string {
-	return fmt.Sprintf("[%s %s %s]", fmtF(v[0]), fmtF(v[1]), fmtF(v[2]))
+	return fmt.Sprintf("x=%s y=%s z=%s", fmtF(v[0]), fmtF(v[1]), fmtF(v[2]))
 }
 
 func fmtVec4(v [4]float64) string {
-	return fmt.Sprintf("[%s %s %s %s]", fmtF(v[0]), fmtF(v[1]), fmtF(v[2]), fmtF(v[3]))
+	return fmt.Sprintf("r=%s g=%s b=%s a=%s", fmtF(v[0]), fmtF(v[1]), fmtF(v[2]), fmtF(v[3]))
 }
 
 func ptrLabel(p *int, prefix string) string {
