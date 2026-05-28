@@ -153,38 +153,6 @@ func setupGitMergeDriver(repoDir string) error {
 		f.Close()
 	}
 
-	// .gitignore — add safety-net entries for git mergetool temp files and
-	// vim swap files so they never accidentally get staged.
-	ignorePath := filepath.Join(repoDir, ".gitignore")
-	ignoreExisting, _ := os.ReadFile(ignorePath)
-	ignoreEntries := []string{
-		"*.swp",
-		"*_BASE_*.glb",
-		"*_LOCAL_*.glb",
-		"*_REMOTE_*.glb",
-		"*_BACKUP_*.glb",
-	}
-	var ignoreToAdd []string
-	for _, e := range ignoreEntries {
-		if !bytes.Contains(ignoreExisting, []byte(e)) {
-			ignoreToAdd = append(ignoreToAdd, e)
-		}
-	}
-	if len(ignoreToAdd) > 0 {
-		f, err := os.OpenFile(ignorePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-			return err
-		}
-		if len(ignoreExisting) > 0 && !bytes.HasSuffix(ignoreExisting, []byte("\n")) {
-			fmt.Fprintln(f)
-		}
-		fmt.Fprintln(f, "# Forge / git mergetool temp files")
-		for _, e := range ignoreToAdd {
-			fmt.Fprintln(f, e)
-		}
-		f.Close()
-	}
-
 	return nil
 }
 
