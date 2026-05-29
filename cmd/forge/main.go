@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"os/exec"
@@ -149,7 +150,7 @@ func setupGitMergeDriver(repoDir string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(f, "\n[merge \"forge\"]\n\tname = Forge semantic merge\n\tdriver = forge merge-file %%O %%A %%B\n")
+		fmt.Fprintf(f, "\n[merge \"forge\"]\n\tname = Forge semantic merge\n\tdriver = forge merge-file %%O %%A %%B %%P\n")
 		f.Close()
 	}
 
@@ -785,6 +786,20 @@ func findConflictedFiles(root string) ([]string, error) {
 	}
 
 	sort.Strings(conflicted)
+
+	// Remove orphaned sidecars written to git temp file paths (e.g.
+	// .merge_file_nIuEyX.forge-conflict). These are left when an older forge
+	// merge driver wrote the sidecar next to %A instead of next to %P.
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if strings.HasPrefix(d.Name(), ".merge_file_") && strings.HasSuffix(d.Name(), ".forge-conflict") {
+			os.Remove(p)
+		}
+		return nil
+	})
+
 	return conflicted, nil
 }
 
@@ -1160,13 +1175,20 @@ format handler. The result is written back to OURS, matching git merge-file beha
 
 Exits 0 on a clean merge, 1 if there are conflicts (conflict markers are
 written into OURS so you can inspect and resolve them).`,
-		Args: cobra.ExactArgs(3),
+		Args: cobra.RangeArgs(3, 4),
 		RunE: runMergeFile,
 	}
 }
 
 func runMergeFile(_ *cobra.Command, args []string) error {
 	basePath, oursPath, theirsPath := cleanPath(args[0]), cleanPath(args[1]), cleanPath(args[2])
+	// %P (real working-tree path) is passed as an optional 4th arg by git's merge
+	// driver machinery. Without it the sidecar would be written next to the temp
+	// file git passes as %A, leaving an orphan instead of <realfile>.forge-conflict.
+	sidecarBase := oursPath
+	if len(args) == 4 {
+		sidecarBase = cleanPath(args[3])
+	}
 
 	base, err := os.ReadFile(basePath)
 	if err != nil {
@@ -1208,7 +1230,7 @@ func runMergeFile(_ *cobra.Command, args []string) error {
 			TheirsB64: base64.StdEncoding.EncodeToString(theirs),
 		}
 		if data, err := json.MarshalIndent(sidecar, "", "  "); err == nil {
-			_ = os.WriteFile(oursPath+".forge-conflict", data, 0644)
+			_ = os.WriteFile(sidecarBase+".forge-conflict", data, 0644)
 		}
 
 		fmt.Fprintf(os.Stderr, "CONFLICT: %d conflict(s) in %s\n", len(ci.Conflicts), oursPath)
