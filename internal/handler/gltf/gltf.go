@@ -407,135 +407,98 @@ func setRoughness(m *gltf.Material, v float64) {
 
 // ── merge: meshes ─────────────────────────────────────────────────────────────
 
-// mergeMeshList merges mesh arrays 3-way treating each mesh as an atomic unit.
-// Geometry data cannot be merged at the property level, so conflicting changes
-// to the same mesh are reported and ours is kept.
+// mergeMeshList detects 3-way conflicts on mesh arrays but always returns ours
+// unchanged. Meshes reference accessors/bufferViews/buffers by integer index;
+// copying a mesh from theirs would produce dangling index references because the
+// accessor array in the merged document comes from ours. Full index-remapping
+// (required for safe cross-document mesh import) is deferred to a future release.
 func mergeMeshList(base, ours, theirs []*gltf.Mesh, conflicts *[]handler.SemanticConflict) []*gltf.Mesh {
 	baseMap, _ := meshMap(base)
 	oursMap, _ := meshMap(ours)
 	theirsMap, _ := meshMap(theirs)
 
-	seen := make(map[string]bool)
-	var names []string
-	for i, m := range ours {
-		k := meshName(m, i)
-		names = append(names, k)
-		seen[k] = true
-	}
-	for i, m := range theirs {
-		k := meshName(m, i)
-		if !seen[k] {
-			names = append(names, k)
-			seen[k] = true
-		}
-	}
-
-	var result []*gltf.Mesh
-	for _, name := range names {
+	for i, om := range ours {
+		name := meshName(om, i)
 		bm := baseMap[name]
-		om, inOurs := oursMap[name]
 		tm, inTheirs := theirsMap[name]
-
-		switch {
-		case inOurs && inTheirs:
-			ourChanged := !jsonEqual(bm, om)
-			theirChanged := !jsonEqual(bm, tm)
-			switch {
-			case !ourChanged && theirChanged:
-				result = append(result, tm)
-			case ourChanged && theirChanged && !jsonEqual(om, tm):
-				*conflicts = append(*conflicts, handler.SemanticConflict{
-					Path:   "meshes." + name,
-					Ours:   fmt.Sprintf("%d primitives", len(om.Primitives)),
-					Theirs: fmt.Sprintf("%d primitives", len(tm.Primitives)),
-				})
-				result = append(result, om)
-			default:
-				result = append(result, om)
-			}
-		case inOurs && !inTheirs:
+		if !inTheirs {
 			if bm != nil {
 				*conflicts = append(*conflicts, handler.SemanticConflict{
 					Path: "meshes." + name, Ours: "kept", Theirs: "removed",
 				})
 			}
-			result = append(result, om)
-		case !inOurs && inTheirs:
-			if bm != nil {
-				*conflicts = append(*conflicts, handler.SemanticConflict{
-					Path: "meshes." + name, Ours: "removed", Theirs: "kept",
-				})
-			} else {
-				result = append(result, tm)
-			}
+			continue
+		}
+		ourChanged := !jsonEqual(bm, om)
+		theirChanged := !jsonEqual(bm, tm)
+		if ourChanged && theirChanged && !jsonEqual(om, tm) {
+			*conflicts = append(*conflicts, handler.SemanticConflict{
+				Path:   "meshes." + name,
+				Ours:   fmt.Sprintf("%d primitives", len(om.Primitives)),
+				Theirs: fmt.Sprintf("%d primitives", len(tm.Primitives)),
+			})
 		}
 	}
-	return result
+	for i, tm := range theirs {
+		name := meshName(tm, i)
+		if _, inOurs := oursMap[name]; inOurs {
+			continue
+		}
+		if baseMap[name] != nil {
+			*conflicts = append(*conflicts, handler.SemanticConflict{
+				Path: "meshes." + name, Ours: "removed", Theirs: "kept",
+			})
+		}
+		// only-theirs-added: cannot safely include (accessor refs would dangle)
+	}
+	return ours
 }
 
 // ── merge: animations ─────────────────────────────────────────────────────────
 
+// mergeAnimationList detects 3-way conflicts on animation arrays but always
+// returns ours unchanged. Animations reference accessors for sampler data;
+// the same index-remapping constraint as mergeMeshList applies.
 func mergeAnimationList(base, ours, theirs []*gltf.Animation, conflicts *[]handler.SemanticConflict) []*gltf.Animation {
 	baseMap, _ := animMap(base)
 	oursMap, _ := animMap(ours)
 	theirsMap, _ := animMap(theirs)
 
-	seen := make(map[string]bool)
-	var names []string
-	for i, a := range ours {
-		k := animName(a, i)
-		names = append(names, k)
-		seen[k] = true
-	}
-	for i, a := range theirs {
-		k := animName(a, i)
-		if !seen[k] {
-			names = append(names, k)
-			seen[k] = true
-		}
-	}
-
-	var result []*gltf.Animation
-	for _, name := range names {
+	for i, oa := range ours {
+		name := animName(oa, i)
 		ba := baseMap[name]
-		oa, inOurs := oursMap[name]
 		ta, inTheirs := theirsMap[name]
-
-		switch {
-		case inOurs && inTheirs:
-			ourChanged := !jsonEqual(ba, oa)
-			theirChanged := !jsonEqual(ba, ta)
-			switch {
-			case !ourChanged && theirChanged:
-				result = append(result, ta)
-			case ourChanged && theirChanged && !jsonEqual(oa, ta):
-				*conflicts = append(*conflicts, handler.SemanticConflict{
-					Path:   "animations." + name,
-					Ours:   fmt.Sprintf("%d channels", len(oa.Channels)),
-					Theirs: fmt.Sprintf("%d channels", len(ta.Channels)),
-				})
-				result = append(result, oa)
-			default:
-				result = append(result, oa)
-			}
-		case inOurs && !inTheirs:
+		if !inTheirs {
 			if ba != nil {
 				*conflicts = append(*conflicts, handler.SemanticConflict{
 					Path: "animations." + name, Ours: "kept", Theirs: "removed",
 				})
 			}
-			result = append(result, oa)
-		case !inOurs && inTheirs:
-			if ba != nil {
-				*conflicts = append(*conflicts, handler.SemanticConflict{
-					Path: "animations." + name, Ours: "removed", Theirs: "kept",
-				})
-			} else {
-				result = append(result, ta)
-			}
+			continue
+		}
+		ourChanged := !jsonEqual(ba, oa)
+		theirChanged := !jsonEqual(ba, ta)
+		if ourChanged && theirChanged && !jsonEqual(oa, ta) {
+			*conflicts = append(*conflicts, handler.SemanticConflict{
+				Path:   "animations." + name,
+				Ours:   fmt.Sprintf("%d channels", len(oa.Channels)),
+				Theirs: fmt.Sprintf("%d channels", len(ta.Channels)),
+			})
 		}
 	}
-	return result
+	for i, ta := range theirs {
+		name := animName(ta, i)
+		if _, inOurs := oursMap[name]; inOurs {
+			continue
+		}
+		if baseMap[name] != nil {
+			*conflicts = append(*conflicts, handler.SemanticConflict{
+				Path: "animations." + name, Ours: "removed", Theirs: "kept",
+			})
+		}
+		// only-theirs-added: cannot safely include (accessor refs would dangle)
+	}
+	return ours
 }
 
 // jsonEqual reports whether a and b serialize to the same JSON. Used to detect
