@@ -700,6 +700,9 @@ func encodeBlob(doc *gltf.Document, binary bool) ([]byte, error) {
 // comparing nodes (translation/rotation/scale), materials (PBR factors),
 // meshes (name/primitive count), and animations (name/channel count).
 func (h *Handler) Diff(base, head handler.Blob) (handler.StructuredDiff, error) {
+	if len(base) == 0 {
+		return handler.StructuredDiff{}, nil
+	}
 	docA, err := parseDoc(base)
 	if err != nil {
 		return handler.StructuredDiff{}, fmt.Errorf("parsing base: %w", err)
