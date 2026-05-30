@@ -765,15 +765,23 @@ func diffNodes(a, b *gltf.Document) *handler.DiffChange {
 
 		switch {
 		case !inA:
-			children = append(children, handler.DiffChange{
+			c := handler.DiffChange{
 				Path: "nodes." + name, Label: name,
 				Kind: handler.Added, After: "node",
-			})
+			}
+			if props := nodePropsOneSide(bn, handler.Added); len(props) > 0 {
+				c.Children = props
+			}
+			children = append(children, c)
 		case !inB:
-			children = append(children, handler.DiffChange{
+			c := handler.DiffChange{
 				Path: "nodes." + name, Label: name,
 				Kind: handler.Removed, Before: "node",
-			})
+			}
+			if props := nodePropsOneSide(an, handler.Removed); len(props) > 0 {
+				c.Children = props
+			}
+			children = append(children, c)
 		default:
 			if props := diffNodeProps(an, bn); len(props) > 0 {
 				children = append(children, handler.DiffChange{
@@ -846,6 +854,57 @@ func diffNodeProps(a, b *gltf.Node) []handler.DiffChange {
 			Path: "mesh", Label: "mesh",
 			Kind: handler.Modified, Before: meshA, After: meshB,
 		})
+	}
+
+	return changes
+}
+
+// nodePropsOneSide returns DiffChange entries for the non-default properties of
+// a single node (used when a node is purely added or purely removed).
+func nodePropsOneSide(n *gltf.Node, kind handler.ChangeKind) []handler.DiffChange {
+	var changes []handler.DiffChange
+
+	if t := n.TranslationOrDefault(); !nearEq3(t, gltf.DefaultTranslation) {
+		v := fmtVec3(blenderTranslation(t))
+		c := handler.DiffChange{Path: "translation", Label: "translation", Kind: kind}
+		if kind == handler.Added {
+			c.After = v
+		} else {
+			c.Before = v
+		}
+		changes = append(changes, c)
+	}
+
+	if r := n.RotationOrDefault(); !nearEq4(r, gltf.DefaultRotation) {
+		v := fmtRot(r)
+		c := handler.DiffChange{Path: "rotation", Label: "rotation", Kind: kind}
+		if kind == handler.Added {
+			c.After = v
+		} else {
+			c.Before = v
+		}
+		changes = append(changes, c)
+	}
+
+	if s := n.ScaleOrDefault(); !nearEq3(s, gltf.DefaultScale) {
+		v := fmtVec3(blenderScale(s))
+		c := handler.DiffChange{Path: "scale", Label: "scale", Kind: kind}
+		if kind == handler.Added {
+			c.After = v
+		} else {
+			c.Before = v
+		}
+		changes = append(changes, c)
+	}
+
+	if m := ptrLabel(n.Mesh, "mesh"); m != "" {
+		c := handler.DiffChange{Path: "mesh", Label: "mesh", Kind: kind}
+		if kind == handler.Added {
+			c.After = m
+		} else {
+			c.Before = m
+		}
+		changes = append(changes, c)
 	}
 
 	return changes

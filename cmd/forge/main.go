@@ -629,13 +629,22 @@ func renderChanges(changes []handler.DiffChange, connPrefix, contPrefix string) 
 		}
 
 		if len(c.Children) > 0 {
-			// Section / group node: print label as a plain header, then recurse.
-			if connPrefix == "" {
-				fmt.Printf("\n%s\n", label)
-			} else {
-				fmt.Printf("%s%s\n", myConn, label)
+			switch c.Kind {
+			case handler.Added:
+				fmt.Printf("\x1b[32m%s+ [%s] %v\x1b[0m\n", myConn, label, c.After)
+				renderChanges(c.Children, childConn, childCont)
+			case handler.Removed:
+				fmt.Printf("\x1b[31m%s- [%s] %v\x1b[0m\n", myConn, label, c.Before)
+				renderChanges(c.Children, childConn, childCont)
+			default:
+				// Section / group node: print label as a plain header, then recurse.
+				if connPrefix == "" {
+					fmt.Printf("\n%s\n", label)
+				} else {
+					fmt.Printf("%s%s\n", myConn, label)
+				}
+				renderChanges(c.Children, childConn, childCont)
 			}
-			renderChanges(c.Children, childConn, childCont)
 		} else {
 			switch c.Kind {
 			case handler.Added:
