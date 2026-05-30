@@ -115,7 +115,7 @@ func mergeNodeList(base, ours, theirs []*gltf.Node, conflicts *[]handler.Semanti
 			if bn != nil {
 				// theirs removed it, ours kept it → conflict, keep ours
 				*conflicts = append(*conflicts, handler.SemanticConflict{
-					Path: "nodes." + name, Ours: "kept", Theirs: "removed",
+					Path: "nodes/" + name, Ours: "kept", Theirs: "removed",
 				})
 			}
 			// !bn: only ours added → include
@@ -125,7 +125,7 @@ func mergeNodeList(base, ours, theirs []*gltf.Node, conflicts *[]handler.Semanti
 			if bn != nil {
 				// ours removed it, theirs kept it → conflict, ours wins (omit)
 				*conflicts = append(*conflicts, handler.SemanticConflict{
-					Path: "nodes." + name, Ours: "removed", Theirs: "kept",
+					Path: "nodes/" + name, Ours: "removed", Theirs: "kept",
 				})
 			} else {
 				// only theirs added → include
@@ -159,7 +159,7 @@ func merge3Node(bn, on, tn *gltf.Node, name string, conflicts *[]handler.Semanti
 			out.Translation = ourTr
 		} else {
 			*conflicts = append(*conflicts, handler.SemanticConflict{
-				Path: "nodes." + name + ".translation",
+				Path: "nodes/" + name + "/translation",
 				Ours: fmtVec3(blenderTranslation(ourTr)), Theirs: fmtVec3(blenderTranslation(theirTr)),
 			})
 		}
@@ -173,7 +173,7 @@ func merge3Node(bn, on, tn *gltf.Node, name string, conflicts *[]handler.Semanti
 			out.Rotation = ourRot
 		} else {
 			*conflicts = append(*conflicts, handler.SemanticConflict{
-				Path: "nodes." + name + ".rotation",
+				Path: "nodes/" + name + "/rotation",
 				Ours: fmtRot(ourRot), Theirs: fmtRot(theirRot),
 			})
 		}
@@ -187,7 +187,7 @@ func merge3Node(bn, on, tn *gltf.Node, name string, conflicts *[]handler.Semanti
 			out.Scale = ourSc
 		} else {
 			*conflicts = append(*conflicts, handler.SemanticConflict{
-				Path: "nodes." + name + ".scale",
+				Path: "nodes/" + name + "/scale",
 				Ours: fmtVec3(blenderScale(ourSc)), Theirs: fmtVec3(blenderScale(theirSc)),
 			})
 		}
@@ -207,7 +207,7 @@ func merge3Node(bn, on, tn *gltf.Node, name string, conflicts *[]handler.Semanti
 		out.Mesh = tn.Mesh
 	} else if ourMesh != baseMesh && theirMesh != baseMesh && ourMesh != theirMesh {
 		*conflicts = append(*conflicts, handler.SemanticConflict{
-			Path: "nodes." + name + ".mesh",
+			Path: "nodes/" + name + "/mesh",
 			Ours: ourMesh, Theirs: theirMesh,
 		})
 	}
@@ -266,14 +266,14 @@ func mergeMaterialList(base, ours, theirs []*gltf.Material, conflicts *[]handler
 		case inOurs && !inTheirs:
 			if bm != nil {
 				*conflicts = append(*conflicts, handler.SemanticConflict{
-					Path: "materials." + name, Ours: "kept", Theirs: "removed",
+					Path: "materials/" + name, Ours: "kept", Theirs: "removed",
 				})
 			}
 			result = append(result, om)
 		case !inOurs && inTheirs:
 			if bm != nil {
 				*conflicts = append(*conflicts, handler.SemanticConflict{
-					Path: "materials." + name, Ours: "removed", Theirs: "kept",
+					Path: "materials/" + name, Ours: "removed", Theirs: "kept",
 				})
 			} else {
 				result = append(result, tm)
@@ -302,7 +302,7 @@ func merge3Material(bm, om, tm *gltf.Material, name string, conflicts *[]handler
 		setBaseColor(out, theirBC)
 	} else if ourBC != baseBC && theirBC != baseBC && ourBC != theirBC {
 		*conflicts = append(*conflicts, handler.SemanticConflict{
-			Path: "materials." + name + ".baseColorFactor",
+			Path: "materials/" + name + "/baseColorFactor",
 			Ours: fmtVec4(ourBC), Theirs: fmtVec4(theirBC),
 		})
 	}
@@ -314,7 +314,7 @@ func merge3Material(bm, om, tm *gltf.Material, name string, conflicts *[]handler
 		setMetallic(out, theirMet)
 	} else if !nearEq(ourMet, baseMet) && !nearEq(theirMet, baseMet) && !nearEq(ourMet, theirMet) {
 		*conflicts = append(*conflicts, handler.SemanticConflict{
-			Path: "materials." + name + ".metallicFactor",
+			Path: "materials/" + name + "/metallicFactor",
 			Ours: fmtF(ourMet), Theirs: fmtF(theirMet),
 		})
 	}
@@ -326,7 +326,7 @@ func merge3Material(bm, om, tm *gltf.Material, name string, conflicts *[]handler
 		setRoughness(out, theirRough)
 	} else if !nearEq(ourRough, baseRough) && !nearEq(theirRough, baseRough) && !nearEq(ourRough, theirRough) {
 		*conflicts = append(*conflicts, handler.SemanticConflict{
-			Path: "materials." + name + ".roughnessFactor",
+			Path: "materials/" + name + "/roughnessFactor",
 			Ours: fmtF(ourRough), Theirs: fmtF(theirRough),
 		})
 	}
@@ -340,7 +340,7 @@ func merge3Material(bm, om, tm *gltf.Material, name string, conflicts *[]handler
 		out.AlphaMode = tm.AlphaMode
 	} else if om.AlphaMode != baseAlpha && tm.AlphaMode != baseAlpha && om.AlphaMode != tm.AlphaMode {
 		*conflicts = append(*conflicts, handler.SemanticConflict{
-			Path: "materials." + name + ".alphaMode",
+			Path: "materials/" + name + "/alphaMode",
 			Ours: string(om.AlphaMode), Theirs: string(tm.AlphaMode),
 		})
 	}
@@ -354,7 +354,7 @@ func merge3Material(bm, om, tm *gltf.Material, name string, conflicts *[]handler
 		out.DoubleSided = tm.DoubleSided
 	} else if om.DoubleSided != baseDS && tm.DoubleSided != baseDS && om.DoubleSided != tm.DoubleSided {
 		*conflicts = append(*conflicts, handler.SemanticConflict{
-			Path:   "materials." + name + ".doubleSided",
+			Path:   "materials/" + name + "/doubleSided",
 			Ours:   fmt.Sprintf("%v", om.DoubleSided),
 			Theirs: fmt.Sprintf("%v", tm.DoubleSided),
 		})
@@ -424,7 +424,7 @@ func mergeMeshList(base, ours, theirs []*gltf.Mesh, conflicts *[]handler.Semanti
 		if !inTheirs {
 			if bm != nil {
 				*conflicts = append(*conflicts, handler.SemanticConflict{
-					Path: "meshes." + name, Ours: "kept", Theirs: "removed",
+					Path: "meshes/" + name, Ours: "kept", Theirs: "removed",
 				})
 			}
 			continue
@@ -433,7 +433,7 @@ func mergeMeshList(base, ours, theirs []*gltf.Mesh, conflicts *[]handler.Semanti
 		theirChanged := !jsonEqual(bm, tm)
 		if ourChanged && theirChanged && !jsonEqual(om, tm) {
 			*conflicts = append(*conflicts, handler.SemanticConflict{
-				Path:   "meshes." + name,
+				Path:   "meshes/" + name,
 				Ours:   fmt.Sprintf("%d primitives", len(om.Primitives)),
 				Theirs: fmt.Sprintf("%d primitives", len(tm.Primitives)),
 			})
@@ -446,7 +446,7 @@ func mergeMeshList(base, ours, theirs []*gltf.Mesh, conflicts *[]handler.Semanti
 		}
 		if baseMap[name] != nil {
 			*conflicts = append(*conflicts, handler.SemanticConflict{
-				Path: "meshes." + name, Ours: "removed", Theirs: "kept",
+				Path: "meshes/" + name, Ours: "removed", Theirs: "kept",
 			})
 		}
 		// only-theirs-added: cannot safely include (accessor refs would dangle)
@@ -471,7 +471,7 @@ func mergeAnimationList(base, ours, theirs []*gltf.Animation, conflicts *[]handl
 		if !inTheirs {
 			if ba != nil {
 				*conflicts = append(*conflicts, handler.SemanticConflict{
-					Path: "animations." + name, Ours: "kept", Theirs: "removed",
+					Path: "animations/" + name, Ours: "kept", Theirs: "removed",
 				})
 			}
 			continue
@@ -480,7 +480,7 @@ func mergeAnimationList(base, ours, theirs []*gltf.Animation, conflicts *[]handl
 		theirChanged := !jsonEqual(ba, ta)
 		if ourChanged && theirChanged && !jsonEqual(oa, ta) {
 			*conflicts = append(*conflicts, handler.SemanticConflict{
-				Path:   "animations." + name,
+				Path:   "animations/" + name,
 				Ours:   fmt.Sprintf("%d channels", len(oa.Channels)),
 				Theirs: fmt.Sprintf("%d channels", len(ta.Channels)),
 			})
@@ -493,7 +493,7 @@ func mergeAnimationList(base, ours, theirs []*gltf.Animation, conflicts *[]handl
 		}
 		if baseMap[name] != nil {
 			*conflicts = append(*conflicts, handler.SemanticConflict{
-				Path: "animations." + name, Ours: "removed", Theirs: "kept",
+				Path: "animations/" + name, Ours: "removed", Theirs: "kept",
 			})
 		}
 		// only-theirs-added: cannot safely include (accessor refs would dangle)
@@ -540,9 +540,10 @@ func (h *Handler) ApplyChoices(merged, theirs handler.Blob, takePaths []string) 
 }
 
 // applyChoice copies the value at path from docT into docM.
-// path format: "nodes.Name[.property]" or "materials.Name[.property]"
+// path format: "nodes/Name[/property]" or "materials/Name[/property]"
+// "/" is used as separator so node/material names containing "." are safe.
 func applyChoice(docM, docT *gltf.Document, path string) {
-	parts := strings.SplitN(path, ".", 3)
+	parts := strings.SplitN(path, "/", 3)
 	if len(parts) < 2 {
 		return
 	}

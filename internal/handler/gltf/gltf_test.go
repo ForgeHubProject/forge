@@ -178,7 +178,7 @@ func TestMerge_BothSidesChangeSameProperty_Conflict(t *testing.T) {
 	if ci == nil || len(ci.Conflicts) == 0 {
 		t.Fatal("expected conflict, got none")
 	}
-	if ci.Conflicts[0].Path != "nodes.Cube.translation" {
+	if ci.Conflicts[0].Path != "nodes/Cube/translation" {
 		t.Errorf("unexpected conflict path: %s", ci.Conflicts[0].Path)
 	}
 }
@@ -228,7 +228,7 @@ func TestMerge_TheirsRemovesNode_OursKept_Conflict(t *testing.T) {
 	if ci == nil || len(ci.Conflicts) == 0 {
 		t.Fatal("expected conflict for remove-vs-keep")
 	}
-	if ci.Conflicts[0].Path != "nodes.Lamp" {
+	if ci.Conflicts[0].Path != "nodes/Lamp" {
 		t.Errorf("unexpected conflict path: %s", ci.Conflicts[0].Path)
 	}
 }
@@ -261,7 +261,7 @@ func TestApplyChoices_TakeTheirsTranslation(t *testing.T) {
 	}
 
 	// User picks incoming (theirs) for the translation conflict.
-	result, err := h.ApplyChoices(merged, theirs, []string{"nodes.Cube.translation"})
+	result, err := h.ApplyChoices(merged, theirs, []string{"nodes/Cube/translation"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +316,7 @@ func TestApplyChoices_TakeTheirsRemovedNode(t *testing.T) {
 		t.Fatal("expected conflict")
 	}
 
-	result, err := h.ApplyChoices(merged, theirs, []string{"nodes.Lamp"})
+	result, err := h.ApplyChoices(merged, theirs, []string{"nodes/Lamp"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,7 +378,7 @@ func TestMergeMesh_BothChangeSameMesh_Conflict(t *testing.T) {
 	if ci == nil || len(ci.Conflicts) == 0 {
 		t.Fatal("expected conflict for divergent mesh changes")
 	}
-	if ci.Conflicts[0].Path != "meshes.Body" {
+	if ci.Conflicts[0].Path != "meshes/Body" {
 		t.Errorf("unexpected conflict path: %s", ci.Conflicts[0].Path)
 	}
 }
@@ -415,7 +415,7 @@ func TestMergeMesh_TheirsRemovesMesh_Conflict(t *testing.T) {
 	if ci == nil || len(ci.Conflicts) == 0 {
 		t.Fatal("expected conflict for remove-vs-keep")
 	}
-	if ci.Conflicts[0].Path != "meshes.Wheel" {
+	if ci.Conflicts[0].Path != "meshes/Wheel" {
 		t.Errorf("unexpected conflict path: %s", ci.Conflicts[0].Path)
 	}
 }
