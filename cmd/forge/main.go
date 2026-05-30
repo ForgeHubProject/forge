@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	gogit "github.com/go-git/go-git/v5"
@@ -182,6 +183,7 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	if head, err := r.Head(); err == nil {
 		if head.Name().IsBranch() {
 			fmt.Printf("On branch \x1b[1m%s\x1b[0m\n", head.Name().Short())
+			printAheadBehind()
 		} else {
 			fmt.Printf("HEAD detached at %s\n", head.Hash().String()[:7])
 		}
@@ -291,6 +293,41 @@ func runStatus(_ *cobra.Command, _ []string) error {
 }
 
 // handlerLabel returns a coloured handler annotation for a file path.
+// printAheadBehind prints "Your branch is ahead/behind/diverged" using git rev-list.
+// Silently does nothing if there is no upstream tracking branch.
+func printAheadBehind() {
+	upstreamOut, err := exec.Command("git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}").Output()
+	if err != nil {
+		return // no upstream configured
+	}
+	upstream := strings.TrimSpace(string(upstreamOut))
+
+	aheadOut, _ := exec.Command("git", "rev-list", "--count", upstream+"..HEAD").Output()
+	behindOut, _ := exec.Command("git", "rev-list", "--count", "HEAD.."+upstream).Output()
+	ahead, _ := strconv.Atoi(strings.TrimSpace(string(aheadOut)))
+	behind, _ := strconv.Atoi(strings.TrimSpace(string(behindOut)))
+
+	switch {
+	case ahead > 0 && behind > 0:
+		fmt.Printf("Your branch and '%s' have diverged,\nand have %d and %d different commits each, respectively.\n", upstream, ahead, behind)
+		fmt.Println("  (use \"forge pull\" to update your local branch)")
+	case ahead > 0:
+		noun := "commit"
+		if ahead != 1 {
+			noun = "commits"
+		}
+		fmt.Printf("Your branch is ahead of '%s' by %d %s.\n", upstream, ahead, noun)
+		fmt.Println("  (use \"forge push\" to publish your local commits)")
+	case behind > 0:
+		noun := "commit"
+		if behind != 1 {
+			noun = "commits"
+		}
+		fmt.Printf("Your branch is behind '%s' by %d %s, and can be fast-forwarded.\n", upstream, behind, noun)
+		fmt.Println("  (use \"forge pull\" to update your local branch)")
+	}
+}
+
 // Format:
 //
 //	[3d › gltf]   — domain + specific handler
