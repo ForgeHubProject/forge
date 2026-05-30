@@ -1163,35 +1163,6 @@ func nearEq4(a, b [4]float64) bool {
 
 // fmtF formats a float64 using float32 precision (matches GLB binary storage).
 
-// quatToEulerXYZ converts a glTF quaternion [x,y,z,w] to XYZ Euler angles in
-// degrees. Quaternions are orientation-only (no winding count), so a value like
-// "594°" from a DCC tool becomes its equivalent orientation in [-180°, 180°].
-func quatToEulerXYZ(q [4]float64) [3]float64 {
-	qx, qy, qz, qw := q[0], q[1], q[2], q[3]
-	const toDeg = 180.0 / math.Pi
-
-	// X (roll)
-	sinr := 2 * (qw*qx + qy*qz)
-	cosr := 1 - 2*(qx*qx+qy*qy)
-	x := math.Atan2(sinr, cosr) * toDeg
-
-	// Y (pitch) — clamp to avoid NaN at poles
-	sinp := 2 * (qw*qy - qz*qx)
-	if sinp > 1 {
-		sinp = 1
-	} else if sinp < -1 {
-		sinp = -1
-	}
-	y := math.Asin(sinp) * toDeg
-
-	// Z (yaw)
-	siny := 2 * (qw*qz + qx*qy)
-	cosy := 1 - 2*(qy*qy+qz*qz)
-	z := math.Atan2(siny, cosy) * toDeg
-
-	return [3]float64{x, y, z}
-}
-
 // blenderTranslation converts a glTF XYZ translation to Blender's coordinate
 // space so the diff output matches what the artist sees in their DCC tool.
 // Blender X = glTF X,  Blender Y = −glTF Z,  Blender Z = glTF Y
