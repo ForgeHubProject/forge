@@ -1208,12 +1208,82 @@ func blenderTranslation(v [3]float64) [3]float64 {
 func blenderScale(v [3]float64) [3]float64 { return [3]float64{v[0], v[2], v[1]} }
 
 // fmtRot formats a quaternion as human-readable Euler degrees in Blender space.
-// glTF Euler XYZ → Blender Euler: X=X, Y=Z, Z=Y
-// Degrees are rounded to 2 decimal places — matches Blender's own precision.
+// Correct conversion: quat → rotation matrix (glTF) → transform to Blender
+// coordinate space → extract intrinsic XYZ Euler angles.
 func fmtRot(q [4]float64) string {
-	e := quatToEulerXYZ(q)
-	b := [3]float64{e[0], e[2], e[1]}
-	return fmt.Sprintf("(%.2f° %.2f° %.2f°)", b[0], b[1], b[2])
+	e := quatToBlenderEulerDeg(q)
+	return fmt.Sprintf("(%.2f° %.2f° %.2f°)", e[0], e[1], e[2])
+}
+
+// quatToBlenderEulerDeg converts a glTF quaternion to Euler XYZ angles in
+// Blender's coordinate space (Z-up, Y-forward), in degrees.
+//
+// glTF uses Y-up right-handed; Blender uses Z-up right-handed.
+// The transform from glTF to Blender space:
+//
+//	R_b2g = [[1,0,0],[0,0,1],[0,-1,0]]  (Blender→glTF)
+//	R_g2b = R_b2g^T                      (glTF→Blender)
+//	M_blender = R_g2b * M_gltf * R_b2g
+func quatToBlenderEulerDeg(q [4]float64) [3]float64 {
+	m := quatToMatrix(q)
+
+	// R_b2g and its transpose R_g2b
+	rb2g := [3][3]float64{{1, 0, 0}, {0, 0, 1}, {0, -1, 0}}
+	rg2b := [3][3]float64{{1, 0, 0}, {0, 0, -1}, {0, 1, 0}}
+
+	mb := mat3Mul(mat3Mul(rg2b, m), rb2g)
+	e := mat3ToEulerXYZ(mb)
+
+	const toDeg = 180.0 / math.Pi
+	return [3]float64{e[0] * toDeg, e[1] * toDeg, e[2] * toDeg}
+}
+
+func quatToMatrix(q [4]float64) [3][3]float64 {
+	x, y, z, w := q[0], q[1], q[2], q[3]
+	return [3][3]float64{
+		{1 - 2*(y*y+z*z), 2*(x*y - w*z), 2*(x*z + w*y)},
+		{2*(x*y + w*z), 1 - 2*(x*x+z*z), 2*(y*z - w*x)},
+		{2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x*x+y*y)},
+	}
+}
+
+func mat3Mul(a, b [3][3]float64) [3][3]float64 {
+	var c [3][3]float64
+	for i := range 3 {
+		for j := range 3 {
+			for k := range 3 {
+				c[i][j] += a[i][k] * b[k][j]
+			}
+		}
+	}
+	return c
+}
+
+// mat3ToEulerXYZ extracts intrinsic XYZ Euler angles (radians) from a
+// rotation matrix. Intrinsic XYZ = M = Rz(γ)·Ry(β)·Rx(α).
+func mat3ToEulerXYZ(m [3][3]float64) [3]float64 {
+	beta := math.Asin(-clampF(m[2][0], -1, 1))
+	cosBeta := math.Cos(beta)
+	var alpha, gamma float64
+	if math.Abs(cosBeta) > 1e-6 {
+		alpha = math.Atan2(m[2][1], m[2][2])
+		gamma = math.Atan2(m[1][0], m[0][0])
+	} else {
+		// Gimbal lock: only α+γ or α-γ is determined.
+		alpha = math.Atan2(-m[1][2], m[1][1])
+		gamma = 0
+	}
+	return [3]float64{alpha, beta, gamma}
+}
+
+func clampF(v, lo, hi float64) float64 {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 func fmtF(v float64) string {
