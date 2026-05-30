@@ -80,7 +80,7 @@ func TestDiff_NodeTranslation(t *testing.T) {
 	// Translation is shown in Blender space: [x, -glTF_z, glTF_y]
 	// glTF [0,1.8,0] → Blender [0, 0, 1.8] (Y in glTF = Z in Blender)
 	// but here the change is on glTF Y (Blender Z), so Before=[0 0 0] After=[0 0 1.8]
-	if props[0].Before != "[0 0 0]" || props[0].After != "[0 0 1.8]" {
+	if props[0].Before != "[0.00 0.00 0.00]" || props[0].After != "[0.00 0.00 1.80]" {
 		t.Errorf("unexpected values: %v → %v", props[0].Before, props[0].After)
 	}
 }

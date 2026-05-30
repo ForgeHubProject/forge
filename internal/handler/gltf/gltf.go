@@ -1320,7 +1320,7 @@ func clampF(v, lo, hi float64) float64 {
 }
 
 func fmtF(v float64) string {
-	return strconv.FormatFloat(v, 'f', -1, 32)
+	return strconv.FormatFloat(v, 'f', 2, 32)
 }
 
 func fmtVec3(v [3]float64) string {
