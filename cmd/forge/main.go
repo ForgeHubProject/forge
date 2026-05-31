@@ -1055,7 +1055,7 @@ func runSemanticMergeFromIndex(path string, h handler.ForgeHandler) error {
 
 	base, err := readStage(1)
 	if err != nil {
-		return err
+		base = nil // add/add: no common ancestor — handler will treat as empty base
 	}
 	ours, err := readStage(2)
 	if err != nil {
