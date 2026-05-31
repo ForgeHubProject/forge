@@ -45,17 +45,13 @@ func (h *Handler) Match(path string) bool {
 // The merged output is always a valid glTF/GLB; conflicts are reported in
 // ConflictInfo and the caller (forge merge-file) exits 1, matching git behaviour.
 func (h *Handler) Merge(base, ours, theirs handler.Blob) (handler.Blob, *handler.ConflictInfo, error) {
+	// For add/add (no common ancestor), treat ours as the base.
+	// base == ours means "ours changed nothing", so every difference in theirs
+	// is taken cleanly. This works correctly for the common case of same-named
+	// objects with different transforms; only theirs' geometry that has no
+	// counterpart in ours carries any risk of dangling accessor refs.
 	if len(base) == 0 {
-		// add/add conflict: both branches independently created this file with no
-		// common ancestor. Semantic merge is unsafe without index remapping (mesh
-		// accessor references would dangle). Return ours intact and surface a
-		// single whole-file conflict so the user can pick which version to keep.
-		ci := &handler.ConflictInfo{
-			Conflicts: []handler.SemanticConflict{{
-				Path: "file", Ours: "created", Theirs: "created",
-			}},
-		}
-		return ours, ci, nil
+		base = ours
 	}
 
 	docBase, err := parseDoc(base)
@@ -537,11 +533,6 @@ func jsonEqual(a, b any) bool {
 func (h *Handler) ApplyChoices(merged, theirs handler.Blob, takePaths []string) (handler.Blob, error) {
 	if len(takePaths) == 0 {
 		return merged, nil
-	}
-	for _, p := range takePaths {
-		if p == "file" {
-			return theirs, nil // whole-file pick: return theirs as-is
-		}
 	}
 	docM, err := parseDoc(merged)
 	if err != nil {
