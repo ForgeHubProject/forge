@@ -834,19 +834,26 @@ func findConflictedFiles(root string) ([]string, error) {
 	sort.Strings(conflicted)
 
 	// Remove orphaned sidecars written to git temp file paths (e.g.
-	// .merge_file_nIuEyX.forge-conflict). These are left when an older forge
-	// merge driver wrote the sidecar next to %A instead of next to %P.
+	// Remove any orphaned .forge-conflict sidecars (temp-path or real-path)
+	// that have no corresponding unresolved file in the index any more.
+	cleanupForgeConflictSidecars(root)
+
+	return conflicted, nil
+}
+
+// cleanupForgeConflictSidecars removes all *.forge-conflict files under root.
+// This covers both properly-named sidecars (Untitled.glb.forge-conflict) and
+// orphaned temp-path sidecars (.merge_file_XXXXXX.forge-conflict).
+func cleanupForgeConflictSidecars(root string) {
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return nil
 		}
-		if strings.HasPrefix(d.Name(), ".merge_file_") && strings.HasSuffix(d.Name(), ".forge-conflict") {
+		if strings.HasSuffix(d.Name(), ".forge-conflict") {
 			os.Remove(p)
 		}
 		return nil
 	})
-
-	return conflicted, nil
 }
 
 // hasConflictMarkers reports whether a file contains git conflict marker lines.
@@ -1195,11 +1202,26 @@ func mergeCmd() *cobra.Command {
 }
 
 func runMerge(_ *cobra.Command, args []string) error {
+	isAbort := false
+	for _, a := range args {
+		if a == "--abort" {
+			isAbort = true
+			break
+		}
+	}
+
 	c := exec.Command("git", append([]string{"merge"}, args...)...)
 	c.Stdin = os.Stdin
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
 	err := c.Run()
+
+	if isAbort {
+		// Clean up any leftover .forge-conflict sidecars git doesn't know about.
+		cleanupForgeConflictSidecars(".")
+		return err
+	}
+
 	if err != nil {
 		// git merge exited non-zero — conflicts or error.
 		// Print a forge-aware hint on top of git's own output.
