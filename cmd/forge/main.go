@@ -189,6 +189,14 @@ func runStatus(_ *cobra.Command, _ []string) error {
 		}
 	}
 
+	// Detect active merge and show unmerged paths before the normal status.
+	if gitDir, err := exec.Command("git", "rev-parse", "--git-dir").Output(); err == nil {
+		mergeHead := filepath.Join(strings.TrimSpace(string(gitDir)), "MERGE_HEAD")
+		if _, mergeErr := os.Stat(mergeHead); mergeErr == nil {
+			printMergeStatus()
+		}
+	}
+
 	wt, err := r.Worktree()
 	if err != nil {
 		return err
@@ -326,6 +334,58 @@ func printAheadBehind() {
 		fmt.Printf("Your branch is behind '%s' by %d %s, and can be fast-forwarded.\n", upstream, behind, noun)
 		fmt.Println("  (use \"forge pull\" to update your local branch)")
 	}
+}
+
+// printMergeStatus prints unmerged paths and hints during an active merge.
+func printMergeStatus() {
+	// git status --porcelain gives "XY path" where XY is the conflict code.
+	out, _ := exec.Command("git", "status", "--porcelain").Output()
+
+	type unmergedEntry struct{ code, path string }
+	var entries []unmergedEntry
+	for _, line := range strings.Split(string(out), "\n") {
+		if len(line) < 4 {
+			continue
+		}
+		xy := line[:2]
+		path := strings.TrimSpace(line[3:])
+		// Conflict codes: DD, AU, UD, UA, DU, AA, UU
+		if strings.ContainsAny(xy, "U") || xy == "AA" || xy == "DD" {
+			entries = append(entries, unmergedEntry{xy, path})
+		}
+	}
+
+	conflictLabel := func(xy string) string {
+		switch xy {
+		case "AA":
+			return "both added:     "
+		case "UU":
+			return "both modified:  "
+		case "DD":
+			return "both deleted:   "
+		case "AU", "UA":
+			return "added/modified: "
+		case "DU", "UD":
+			return "deleted/modified:"
+		default:
+			return "unmerged:       "
+		}
+	}
+
+	fmt.Println("You have unmerged paths.")
+	fmt.Println("  (fix conflicts and run \"forge commit\")")
+	fmt.Println("  (use \"forge merge --abort\" to abort the merge)")
+	if len(entries) > 0 {
+		fmt.Println()
+		fmt.Println("Unmerged paths:")
+		fmt.Println("  (use \"forge mergetool\" to resolve · \"forge add <file>\" to mark resolved)")
+		reg := defaultRegistry()
+		for _, e := range entries {
+			label := handlerLabel(e.path, reg)
+			fmt.Printf("\x1b[31m\t%s%-38s\x1b[0m %s\n", conflictLabel(e.code), e.path, label)
+		}
+	}
+	fmt.Println()
 }
 
 // Format:
