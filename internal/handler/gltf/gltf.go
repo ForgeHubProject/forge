@@ -77,6 +77,16 @@ func (h *Handler) Merge(base, ours, theirs handler.Blob) (handler.Blob, *handler
 	docOurs.Meshes = mergeMeshList(docBase.Meshes, docOurs.Meshes, docTheirs.Meshes, &conflicts)
 	docOurs.Animations = mergeAnimationList(docBase.Animations, docOurs.Animations, docTheirs.Animations, &conflicts)
 
+	// Nodes taken from theirs may reference mesh indices that don't exist in the
+	// merged document (which keeps ours' mesh array). Nil out any out-of-bounds
+	// references so the node appears as an empty object rather than an orphan.
+	nMeshes := len(docOurs.Meshes)
+	for _, n := range docOurs.Nodes {
+		if n.Mesh != nil && int(*n.Mesh) >= nMeshes {
+			n.Mesh = nil
+		}
+	}
+
 	result, err := encodeBlob(docOurs, isGLB(ours))
 	if err != nil {
 		return nil, nil, fmt.Errorf("encoding merged glTF: %w", err)
