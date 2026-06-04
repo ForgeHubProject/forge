@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	gogit "github.com/go-git/go-git/v5"
@@ -149,39 +151,7 @@ func setupGitMergeDriver(repoDir string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(f, "\n[merge \"forge\"]\n\tname = Forge semantic merge\n\tdriver = forge merge-file %%O %%A %%B\n")
-		f.Close()
-	}
-
-	// .gitignore — add safety-net entries for git mergetool temp files and
-	// vim swap files so they never accidentally get staged.
-	ignorePath := filepath.Join(repoDir, ".gitignore")
-	ignoreExisting, _ := os.ReadFile(ignorePath)
-	ignoreEntries := []string{
-		"*.swp",
-		"*_BASE_*.glb",
-		"*_LOCAL_*.glb",
-		"*_REMOTE_*.glb",
-		"*_BACKUP_*.glb",
-	}
-	var ignoreToAdd []string
-	for _, e := range ignoreEntries {
-		if !bytes.Contains(ignoreExisting, []byte(e)) {
-			ignoreToAdd = append(ignoreToAdd, e)
-		}
-	}
-	if len(ignoreToAdd) > 0 {
-		f, err := os.OpenFile(ignorePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-			return err
-		}
-		if len(ignoreExisting) > 0 && !bytes.HasSuffix(ignoreExisting, []byte("\n")) {
-			fmt.Fprintln(f)
-		}
-		fmt.Fprintln(f, "# Forge / git mergetool temp files")
-		for _, e := range ignoreToAdd {
-			fmt.Fprintln(f, e)
-		}
+		fmt.Fprintf(f, "\n[merge \"forge\"]\n\tname = Forge semantic merge\n\tdriver = forge merge-file %%O %%A %%B %%P\n")
 		f.Close()
 	}
 
@@ -213,8 +183,17 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	if head, err := r.Head(); err == nil {
 		if head.Name().IsBranch() {
 			fmt.Printf("On branch \x1b[1m%s\x1b[0m\n", head.Name().Short())
+			printAheadBehind()
 		} else {
 			fmt.Printf("HEAD detached at %s\n", head.Hash().String()[:7])
+		}
+	}
+
+	// Detect active merge and show unmerged paths before the normal status.
+	if gitDir, err := exec.Command("git", "rev-parse", "--git-dir").Output(); err == nil {
+		mergeHead := filepath.Join(strings.TrimSpace(string(gitDir)), "MERGE_HEAD")
+		if _, mergeErr := os.Stat(mergeHead); mergeErr == nil {
+			printMergeStatus()
 		}
 	}
 
@@ -322,6 +301,93 @@ func runStatus(_ *cobra.Command, _ []string) error {
 }
 
 // handlerLabel returns a coloured handler annotation for a file path.
+// printAheadBehind prints "Your branch is ahead/behind/diverged" using git rev-list.
+// Silently does nothing if there is no upstream tracking branch.
+func printAheadBehind() {
+	upstreamOut, err := exec.Command("git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}").Output()
+	if err != nil {
+		return // no upstream configured
+	}
+	upstream := strings.TrimSpace(string(upstreamOut))
+
+	aheadOut, _ := exec.Command("git", "rev-list", "--count", upstream+"..HEAD").Output()
+	behindOut, _ := exec.Command("git", "rev-list", "--count", "HEAD.."+upstream).Output()
+	ahead, _ := strconv.Atoi(strings.TrimSpace(string(aheadOut)))
+	behind, _ := strconv.Atoi(strings.TrimSpace(string(behindOut)))
+
+	switch {
+	case ahead > 0 && behind > 0:
+		fmt.Printf("Your branch and '%s' have diverged,\nand have %d and %d different commits each, respectively.\n", upstream, ahead, behind)
+		fmt.Println("  (use \"forge pull\" to update your local branch)")
+	case ahead > 0:
+		noun := "commit"
+		if ahead != 1 {
+			noun = "commits"
+		}
+		fmt.Printf("Your branch is ahead of '%s' by %d %s.\n", upstream, ahead, noun)
+		fmt.Println("  (use \"forge push\" to publish your local commits)")
+	case behind > 0:
+		noun := "commit"
+		if behind != 1 {
+			noun = "commits"
+		}
+		fmt.Printf("Your branch is behind '%s' by %d %s, and can be fast-forwarded.\n", upstream, behind, noun)
+		fmt.Println("  (use \"forge pull\" to update your local branch)")
+	}
+}
+
+// printMergeStatus prints unmerged paths and hints during an active merge.
+func printMergeStatus() {
+	// git status --porcelain gives "XY path" where XY is the conflict code.
+	out, _ := exec.Command("git", "status", "--porcelain").Output()
+
+	type unmergedEntry struct{ code, path string }
+	var entries []unmergedEntry
+	for _, line := range strings.Split(string(out), "\n") {
+		if len(line) < 4 {
+			continue
+		}
+		xy := line[:2]
+		path := strings.TrimSpace(line[3:])
+		// Conflict codes: DD, AU, UD, UA, DU, AA, UU
+		if strings.ContainsAny(xy, "U") || xy == "AA" || xy == "DD" {
+			entries = append(entries, unmergedEntry{xy, path})
+		}
+	}
+
+	conflictLabel := func(xy string) string {
+		switch xy {
+		case "AA":
+			return "both added:     "
+		case "UU":
+			return "both modified:  "
+		case "DD":
+			return "both deleted:   "
+		case "AU", "UA":
+			return "added/modified: "
+		case "DU", "UD":
+			return "deleted/modified:"
+		default:
+			return "unmerged:       "
+		}
+	}
+
+	fmt.Println("You have unmerged paths.")
+	fmt.Println("  (fix conflicts and run \"forge commit\")")
+	fmt.Println("  (use \"forge merge --abort\" to abort the merge)")
+	if len(entries) > 0 {
+		fmt.Println()
+		fmt.Println("Unmerged paths:")
+		fmt.Println("  (use \"forge mergetool\" to resolve · \"forge add <file>\" to mark resolved)")
+		reg := defaultRegistry()
+		for _, e := range entries {
+			label := handlerLabel(e.path, reg)
+			fmt.Printf("\x1b[31m\t%s%-38s\x1b[0m %s\n", conflictLabel(e.code), e.path, label)
+		}
+	}
+	fmt.Println()
+}
+
 // Format:
 //
 //	[3d › gltf]   — domain + specific handler
@@ -660,13 +726,22 @@ func renderChanges(changes []handler.DiffChange, connPrefix, contPrefix string) 
 		}
 
 		if len(c.Children) > 0 {
-			// Section / group node: print label as a plain header, then recurse.
-			if connPrefix == "" {
-				fmt.Printf("\n%s\n", label)
-			} else {
-				fmt.Printf("%s%s\n", myConn, label)
+			switch c.Kind {
+			case handler.Added:
+				fmt.Printf("\x1b[32m%s+ [%s] %v\x1b[0m\n", myConn, label, c.After)
+				renderChanges(c.Children, childConn, childCont)
+			case handler.Removed:
+				fmt.Printf("\x1b[31m%s- [%s] %v\x1b[0m\n", myConn, label, c.Before)
+				renderChanges(c.Children, childConn, childCont)
+			default:
+				// Section / group node: print label as a plain header, then recurse.
+				if connPrefix == "" {
+					fmt.Printf("\n%s\n", label)
+				} else {
+					fmt.Printf("%s%s\n", myConn, label)
+				}
+				renderChanges(c.Children, childConn, childCont)
 			}
-			renderChanges(c.Children, childConn, childCont)
 		} else {
 			switch c.Kind {
 			case handler.Added:
@@ -817,7 +892,28 @@ func findConflictedFiles(root string) ([]string, error) {
 	}
 
 	sort.Strings(conflicted)
+
+	// Remove orphaned sidecars written to git temp file paths (e.g.
+	// Remove any orphaned .forge-conflict sidecars (temp-path or real-path)
+	// that have no corresponding unresolved file in the index any more.
+	cleanupForgeConflictSidecars(root)
+
 	return conflicted, nil
+}
+
+// cleanupForgeConflictSidecars removes all *.forge-conflict files under root.
+// This covers both properly-named sidecars (Untitled.glb.forge-conflict) and
+// orphaned temp-path sidecars (.merge_file_XXXXXX.forge-conflict).
+func cleanupForgeConflictSidecars(root string) {
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if strings.HasSuffix(d.Name(), ".forge-conflict") {
+			os.Remove(p)
+		}
+		return nil
+	})
 }
 
 // hasConflictMarkers reports whether a file contains git conflict marker lines.
@@ -1019,7 +1115,7 @@ func runSemanticMergeFromIndex(path string, h handler.ForgeHandler) error {
 
 	base, err := readStage(1)
 	if err != nil {
-		return err
+		base = nil // add/add: no common ancestor — handler will treat as empty base
 	}
 	ours, err := readStage(2)
 	if err != nil {
@@ -1166,11 +1262,26 @@ func mergeCmd() *cobra.Command {
 }
 
 func runMerge(_ *cobra.Command, args []string) error {
+	isAbort := false
+	for _, a := range args {
+		if a == "--abort" {
+			isAbort = true
+			break
+		}
+	}
+
 	c := exec.Command("git", append([]string{"merge"}, args...)...)
 	c.Stdin = os.Stdin
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
 	err := c.Run()
+
+	if isAbort {
+		// Clean up any leftover .forge-conflict sidecars git doesn't know about.
+		cleanupForgeConflictSidecars(".")
+		return err
+	}
+
 	if err != nil {
 		// git merge exited non-zero — conflicts or error.
 		// Print a forge-aware hint on top of git's own output.
@@ -1192,13 +1303,20 @@ format handler. The result is written back to OURS, matching git merge-file beha
 
 Exits 0 on a clean merge, 1 if there are conflicts (conflict markers are
 written into OURS so you can inspect and resolve them).`,
-		Args: cobra.ExactArgs(3),
+		Args: cobra.RangeArgs(3, 4),
 		RunE: runMergeFile,
 	}
 }
 
 func runMergeFile(_ *cobra.Command, args []string) error {
 	basePath, oursPath, theirsPath := cleanPath(args[0]), cleanPath(args[1]), cleanPath(args[2])
+	// %P (real working-tree path) is passed as an optional 4th arg by git's merge
+	// driver machinery. Without it the sidecar would be written next to the temp
+	// file git passes as %A, leaving an orphan instead of <realfile>.forge-conflict.
+	sidecarBase := oursPath
+	if len(args) == 4 {
+		sidecarBase = cleanPath(args[3])
+	}
 
 	base, err := os.ReadFile(basePath)
 	if err != nil {
@@ -1240,7 +1358,7 @@ func runMergeFile(_ *cobra.Command, args []string) error {
 			TheirsB64: base64.StdEncoding.EncodeToString(theirs),
 		}
 		if data, err := json.MarshalIndent(sidecar, "", "  "); err == nil {
-			_ = os.WriteFile(oursPath+".forge-conflict", data, 0644)
+			_ = os.WriteFile(sidecarBase+".forge-conflict", data, 0644)
 		}
 
 		fmt.Fprintf(os.Stderr, "CONFLICT: %d conflict(s) in %s\n", len(ci.Conflicts), oursPath)

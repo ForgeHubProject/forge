@@ -45,6 +45,18 @@ func (h *Handler) Match(path string) bool {
 // The merged output is always a valid glTF/GLB; conflicts are reported in
 // ConflictInfo and the caller (forge merge-file) exits 1, matching git behaviour.
 func (h *Handler) Merge(base, ours, theirs handler.Blob) (handler.Blob, *handler.ConflictInfo, error) {
+	if len(base) == 0 {
+		// add/add: both branches independently created this file with no common
+		// ancestor. Surface a single whole-file conflict — the user picks which
+		// version to keep, identical to how git handles binary add/add conflicts.
+		ci := &handler.ConflictInfo{
+			Conflicts: []handler.SemanticConflict{{
+				Path: "file", Ours: "created", Theirs: "created",
+			}},
+		}
+		return ours, ci, nil
+	}
+
 	docBase, err := parseDoc(base)
 	if err != nil {
 		return nil, nil, fmt.Errorf("parsing base: %w", err)
@@ -64,6 +76,16 @@ func (h *Handler) Merge(base, ours, theirs handler.Blob) (handler.Blob, *handler
 	docOurs.Materials = mergeMaterialList(docBase.Materials, docOurs.Materials, docTheirs.Materials, &conflicts)
 	docOurs.Meshes = mergeMeshList(docBase.Meshes, docOurs.Meshes, docTheirs.Meshes, &conflicts)
 	docOurs.Animations = mergeAnimationList(docBase.Animations, docOurs.Animations, docTheirs.Animations, &conflicts)
+
+	// Nodes taken from theirs may reference mesh indices that don't exist in the
+	// merged document (which keeps ours' mesh array). Nil out any out-of-bounds
+	// references so the node appears as an empty object rather than an orphan.
+	nMeshes := len(docOurs.Meshes)
+	for _, n := range docOurs.Nodes {
+		if n.Mesh != nil && int(*n.Mesh) >= nMeshes {
+			n.Mesh = nil
+		}
+	}
 
 	result, err := encodeBlob(docOurs, isGLB(ours))
 	if err != nil {
@@ -115,7 +137,7 @@ func mergeNodeList(base, ours, theirs []*gltf.Node, conflicts *[]handler.Semanti
 			if bn != nil {
 				// theirs removed it, ours kept it → conflict, keep ours
 				*conflicts = append(*conflicts, handler.SemanticConflict{
-					Path: "nodes." + name, Ours: "kept", Theirs: "removed",
+					Path: "nodes/" + name, Ours: "kept", Theirs: "removed",
 				})
 			}
 			// !bn: only ours added → include
@@ -125,7 +147,7 @@ func mergeNodeList(base, ours, theirs []*gltf.Node, conflicts *[]handler.Semanti
 			if bn != nil {
 				// ours removed it, theirs kept it → conflict, ours wins (omit)
 				*conflicts = append(*conflicts, handler.SemanticConflict{
-					Path: "nodes." + name, Ours: "removed", Theirs: "kept",
+					Path: "nodes/" + name, Ours: "removed", Theirs: "kept",
 				})
 			} else {
 				// only theirs added → include
@@ -159,7 +181,7 @@ func merge3Node(bn, on, tn *gltf.Node, name string, conflicts *[]handler.Semanti
 			out.Translation = ourTr
 		} else {
 			*conflicts = append(*conflicts, handler.SemanticConflict{
-				Path: "nodes." + name + ".translation",
+				Path: "nodes/" + name + "/translation",
 				Ours: fmtVec3(blenderTranslation(ourTr)), Theirs: fmtVec3(blenderTranslation(theirTr)),
 			})
 		}
@@ -173,7 +195,7 @@ func merge3Node(bn, on, tn *gltf.Node, name string, conflicts *[]handler.Semanti
 			out.Rotation = ourRot
 		} else {
 			*conflicts = append(*conflicts, handler.SemanticConflict{
-				Path: "nodes." + name + ".rotation",
+				Path: "nodes/" + name + "/rotation",
 				Ours: fmtRot(ourRot), Theirs: fmtRot(theirRot),
 			})
 		}
@@ -187,7 +209,7 @@ func merge3Node(bn, on, tn *gltf.Node, name string, conflicts *[]handler.Semanti
 			out.Scale = ourSc
 		} else {
 			*conflicts = append(*conflicts, handler.SemanticConflict{
-				Path: "nodes." + name + ".scale",
+				Path: "nodes/" + name + "/scale",
 				Ours: fmtVec3(blenderScale(ourSc)), Theirs: fmtVec3(blenderScale(theirSc)),
 			})
 		}
@@ -207,7 +229,7 @@ func merge3Node(bn, on, tn *gltf.Node, name string, conflicts *[]handler.Semanti
 		out.Mesh = tn.Mesh
 	} else if ourMesh != baseMesh && theirMesh != baseMesh && ourMesh != theirMesh {
 		*conflicts = append(*conflicts, handler.SemanticConflict{
-			Path: "nodes." + name + ".mesh",
+			Path: "nodes/" + name + "/mesh",
 			Ours: ourMesh, Theirs: theirMesh,
 		})
 	}
@@ -266,14 +288,14 @@ func mergeMaterialList(base, ours, theirs []*gltf.Material, conflicts *[]handler
 		case inOurs && !inTheirs:
 			if bm != nil {
 				*conflicts = append(*conflicts, handler.SemanticConflict{
-					Path: "materials." + name, Ours: "kept", Theirs: "removed",
+					Path: "materials/" + name, Ours: "kept", Theirs: "removed",
 				})
 			}
 			result = append(result, om)
 		case !inOurs && inTheirs:
 			if bm != nil {
 				*conflicts = append(*conflicts, handler.SemanticConflict{
-					Path: "materials." + name, Ours: "removed", Theirs: "kept",
+					Path: "materials/" + name, Ours: "removed", Theirs: "kept",
 				})
 			} else {
 				result = append(result, tm)
@@ -302,7 +324,7 @@ func merge3Material(bm, om, tm *gltf.Material, name string, conflicts *[]handler
 		setBaseColor(out, theirBC)
 	} else if ourBC != baseBC && theirBC != baseBC && ourBC != theirBC {
 		*conflicts = append(*conflicts, handler.SemanticConflict{
-			Path: "materials." + name + ".baseColorFactor",
+			Path: "materials/" + name + "/baseColorFactor",
 			Ours: fmtVec4(ourBC), Theirs: fmtVec4(theirBC),
 		})
 	}
@@ -314,7 +336,7 @@ func merge3Material(bm, om, tm *gltf.Material, name string, conflicts *[]handler
 		setMetallic(out, theirMet)
 	} else if !nearEq(ourMet, baseMet) && !nearEq(theirMet, baseMet) && !nearEq(ourMet, theirMet) {
 		*conflicts = append(*conflicts, handler.SemanticConflict{
-			Path: "materials." + name + ".metallicFactor",
+			Path: "materials/" + name + "/metallicFactor",
 			Ours: fmtF(ourMet), Theirs: fmtF(theirMet),
 		})
 	}
@@ -326,7 +348,7 @@ func merge3Material(bm, om, tm *gltf.Material, name string, conflicts *[]handler
 		setRoughness(out, theirRough)
 	} else if !nearEq(ourRough, baseRough) && !nearEq(theirRough, baseRough) && !nearEq(ourRough, theirRough) {
 		*conflicts = append(*conflicts, handler.SemanticConflict{
-			Path: "materials." + name + ".roughnessFactor",
+			Path: "materials/" + name + "/roughnessFactor",
 			Ours: fmtF(ourRough), Theirs: fmtF(theirRough),
 		})
 	}
@@ -340,7 +362,7 @@ func merge3Material(bm, om, tm *gltf.Material, name string, conflicts *[]handler
 		out.AlphaMode = tm.AlphaMode
 	} else if om.AlphaMode != baseAlpha && tm.AlphaMode != baseAlpha && om.AlphaMode != tm.AlphaMode {
 		*conflicts = append(*conflicts, handler.SemanticConflict{
-			Path: "materials." + name + ".alphaMode",
+			Path: "materials/" + name + "/alphaMode",
 			Ours: string(om.AlphaMode), Theirs: string(tm.AlphaMode),
 		})
 	}
@@ -354,7 +376,7 @@ func merge3Material(bm, om, tm *gltf.Material, name string, conflicts *[]handler
 		out.DoubleSided = tm.DoubleSided
 	} else if om.DoubleSided != baseDS && tm.DoubleSided != baseDS && om.DoubleSided != tm.DoubleSided {
 		*conflicts = append(*conflicts, handler.SemanticConflict{
-			Path:   "materials." + name + ".doubleSided",
+			Path:   "materials/" + name + "/doubleSided",
 			Ours:   fmt.Sprintf("%v", om.DoubleSided),
 			Theirs: fmt.Sprintf("%v", tm.DoubleSided),
 		})
@@ -407,135 +429,98 @@ func setRoughness(m *gltf.Material, v float64) {
 
 // ── merge: meshes ─────────────────────────────────────────────────────────────
 
-// mergeMeshList merges mesh arrays 3-way treating each mesh as an atomic unit.
-// Geometry data cannot be merged at the property level, so conflicting changes
-// to the same mesh are reported and ours is kept.
+// mergeMeshList detects 3-way conflicts on mesh arrays but always returns ours
+// unchanged. Meshes reference accessors/bufferViews/buffers by integer index;
+// copying a mesh from theirs would produce dangling index references because the
+// accessor array in the merged document comes from ours. Full index-remapping
+// (required for safe cross-document mesh import) is deferred to a future release.
 func mergeMeshList(base, ours, theirs []*gltf.Mesh, conflicts *[]handler.SemanticConflict) []*gltf.Mesh {
 	baseMap, _ := meshMap(base)
 	oursMap, _ := meshMap(ours)
 	theirsMap, _ := meshMap(theirs)
 
-	seen := make(map[string]bool)
-	var names []string
-	for i, m := range ours {
-		k := meshName(m, i)
-		names = append(names, k)
-		seen[k] = true
-	}
-	for i, m := range theirs {
-		k := meshName(m, i)
-		if !seen[k] {
-			names = append(names, k)
-			seen[k] = true
-		}
-	}
-
-	var result []*gltf.Mesh
-	for _, name := range names {
+	for i, om := range ours {
+		name := meshName(om, i)
 		bm := baseMap[name]
-		om, inOurs := oursMap[name]
 		tm, inTheirs := theirsMap[name]
-
-		switch {
-		case inOurs && inTheirs:
-			ourChanged := !jsonEqual(bm, om)
-			theirChanged := !jsonEqual(bm, tm)
-			switch {
-			case !ourChanged && theirChanged:
-				result = append(result, tm)
-			case ourChanged && theirChanged && !jsonEqual(om, tm):
-				*conflicts = append(*conflicts, handler.SemanticConflict{
-					Path:   "meshes." + name,
-					Ours:   fmt.Sprintf("%d primitives", len(om.Primitives)),
-					Theirs: fmt.Sprintf("%d primitives", len(tm.Primitives)),
-				})
-				result = append(result, om)
-			default:
-				result = append(result, om)
-			}
-		case inOurs && !inTheirs:
+		if !inTheirs {
 			if bm != nil {
 				*conflicts = append(*conflicts, handler.SemanticConflict{
-					Path: "meshes." + name, Ours: "kept", Theirs: "removed",
+					Path: "meshes/" + name, Ours: "kept", Theirs: "removed",
 				})
 			}
-			result = append(result, om)
-		case !inOurs && inTheirs:
-			if bm != nil {
-				*conflicts = append(*conflicts, handler.SemanticConflict{
-					Path: "meshes." + name, Ours: "removed", Theirs: "kept",
-				})
-			} else {
-				result = append(result, tm)
-			}
+			continue
+		}
+		ourChanged := !jsonEqual(bm, om)
+		theirChanged := !jsonEqual(bm, tm)
+		if ourChanged && theirChanged && !jsonEqual(om, tm) {
+			*conflicts = append(*conflicts, handler.SemanticConflict{
+				Path:   "meshes/" + name,
+				Ours:   fmt.Sprintf("%d primitives", len(om.Primitives)),
+				Theirs: fmt.Sprintf("%d primitives", len(tm.Primitives)),
+			})
 		}
 	}
-	return result
+	for i, tm := range theirs {
+		name := meshName(tm, i)
+		if _, inOurs := oursMap[name]; inOurs {
+			continue
+		}
+		if baseMap[name] != nil {
+			*conflicts = append(*conflicts, handler.SemanticConflict{
+				Path: "meshes/" + name, Ours: "removed", Theirs: "kept",
+			})
+		}
+		// only-theirs-added: cannot safely include (accessor refs would dangle)
+	}
+	return ours
 }
 
 // ── merge: animations ─────────────────────────────────────────────────────────
 
+// mergeAnimationList detects 3-way conflicts on animation arrays but always
+// returns ours unchanged. Animations reference accessors for sampler data;
+// the same index-remapping constraint as mergeMeshList applies.
 func mergeAnimationList(base, ours, theirs []*gltf.Animation, conflicts *[]handler.SemanticConflict) []*gltf.Animation {
 	baseMap, _ := animMap(base)
 	oursMap, _ := animMap(ours)
 	theirsMap, _ := animMap(theirs)
 
-	seen := make(map[string]bool)
-	var names []string
-	for i, a := range ours {
-		k := animName(a, i)
-		names = append(names, k)
-		seen[k] = true
-	}
-	for i, a := range theirs {
-		k := animName(a, i)
-		if !seen[k] {
-			names = append(names, k)
-			seen[k] = true
-		}
-	}
-
-	var result []*gltf.Animation
-	for _, name := range names {
+	for i, oa := range ours {
+		name := animName(oa, i)
 		ba := baseMap[name]
-		oa, inOurs := oursMap[name]
 		ta, inTheirs := theirsMap[name]
-
-		switch {
-		case inOurs && inTheirs:
-			ourChanged := !jsonEqual(ba, oa)
-			theirChanged := !jsonEqual(ba, ta)
-			switch {
-			case !ourChanged && theirChanged:
-				result = append(result, ta)
-			case ourChanged && theirChanged && !jsonEqual(oa, ta):
-				*conflicts = append(*conflicts, handler.SemanticConflict{
-					Path:   "animations." + name,
-					Ours:   fmt.Sprintf("%d channels", len(oa.Channels)),
-					Theirs: fmt.Sprintf("%d channels", len(ta.Channels)),
-				})
-				result = append(result, oa)
-			default:
-				result = append(result, oa)
-			}
-		case inOurs && !inTheirs:
+		if !inTheirs {
 			if ba != nil {
 				*conflicts = append(*conflicts, handler.SemanticConflict{
-					Path: "animations." + name, Ours: "kept", Theirs: "removed",
+					Path: "animations/" + name, Ours: "kept", Theirs: "removed",
 				})
 			}
-			result = append(result, oa)
-		case !inOurs && inTheirs:
-			if ba != nil {
-				*conflicts = append(*conflicts, handler.SemanticConflict{
-					Path: "animations." + name, Ours: "removed", Theirs: "kept",
-				})
-			} else {
-				result = append(result, ta)
-			}
+			continue
+		}
+		ourChanged := !jsonEqual(ba, oa)
+		theirChanged := !jsonEqual(ba, ta)
+		if ourChanged && theirChanged && !jsonEqual(oa, ta) {
+			*conflicts = append(*conflicts, handler.SemanticConflict{
+				Path:   "animations/" + name,
+				Ours:   fmt.Sprintf("%d channels", len(oa.Channels)),
+				Theirs: fmt.Sprintf("%d channels", len(ta.Channels)),
+			})
 		}
 	}
-	return result
+	for i, ta := range theirs {
+		name := animName(ta, i)
+		if _, inOurs := oursMap[name]; inOurs {
+			continue
+		}
+		if baseMap[name] != nil {
+			*conflicts = append(*conflicts, handler.SemanticConflict{
+				Path: "animations/" + name, Ours: "removed", Theirs: "kept",
+			})
+		}
+		// only-theirs-added: cannot safely include (accessor refs would dangle)
+	}
+	return ours
 }
 
 // jsonEqual reports whether a and b serialize to the same JSON. Used to detect
@@ -562,6 +547,11 @@ func (h *Handler) ApplyChoices(merged, theirs handler.Blob, takePaths []string) 
 	if len(takePaths) == 0 {
 		return merged, nil
 	}
+	for _, p := range takePaths {
+		if p == "file" {
+			return theirs, nil // whole-file pick: return theirs as-is
+		}
+	}
 	docM, err := parseDoc(merged)
 	if err != nil {
 		return nil, fmt.Errorf("parsing merged: %w", err)
@@ -577,9 +567,10 @@ func (h *Handler) ApplyChoices(merged, theirs handler.Blob, takePaths []string) 
 }
 
 // applyChoice copies the value at path from docT into docM.
-// path format: "nodes.Name[.property]" or "materials.Name[.property]"
+// path format: "nodes/Name[/property]" or "materials/Name[/property]"
+// "/" is used as separator so node/material names containing "." are safe.
 func applyChoice(docM, docT *gltf.Document, path string) {
-	parts := strings.SplitN(path, ".", 3)
+	parts := strings.SplitN(path, "/", 3)
 	if len(parts) < 2 {
 		return
 	}
@@ -700,6 +691,9 @@ func encodeBlob(doc *gltf.Document, binary bool) ([]byte, error) {
 // comparing nodes (translation/rotation/scale), materials (PBR factors),
 // meshes (name/primitive count), and animations (name/channel count).
 func (h *Handler) Diff(base, head handler.Blob) (handler.StructuredDiff, error) {
+	if len(base) == 0 {
+		return handler.StructuredDiff{}, nil
+	}
 	docA, err := parseDoc(base)
 	if err != nil {
 		return handler.StructuredDiff{}, fmt.Errorf("parsing base: %w", err)
@@ -765,15 +759,23 @@ func diffNodes(a, b *gltf.Document) *handler.DiffChange {
 
 		switch {
 		case !inA:
-			children = append(children, handler.DiffChange{
+			c := handler.DiffChange{
 				Path: "nodes." + name, Label: name,
 				Kind: handler.Added, After: "node",
-			})
+			}
+			if props := nodePropsOneSide(bn, handler.Added); len(props) > 0 {
+				c.Children = props
+			}
+			children = append(children, c)
 		case !inB:
-			children = append(children, handler.DiffChange{
+			c := handler.DiffChange{
 				Path: "nodes." + name, Label: name,
 				Kind: handler.Removed, Before: "node",
-			})
+			}
+			if props := nodePropsOneSide(an, handler.Removed); len(props) > 0 {
+				c.Children = props
+			}
+			children = append(children, c)
 		default:
 			if props := diffNodeProps(an, bn); len(props) > 0 {
 				children = append(children, handler.DiffChange{
@@ -846,6 +848,57 @@ func diffNodeProps(a, b *gltf.Node) []handler.DiffChange {
 			Path: "mesh", Label: "mesh",
 			Kind: handler.Modified, Before: meshA, After: meshB,
 		})
+	}
+
+	return changes
+}
+
+// nodePropsOneSide returns DiffChange entries for the non-default properties of
+// a single node (used when a node is purely added or purely removed).
+func nodePropsOneSide(n *gltf.Node, kind handler.ChangeKind) []handler.DiffChange {
+	var changes []handler.DiffChange
+
+	if t := n.TranslationOrDefault(); !nearEq3(t, gltf.DefaultTranslation) {
+		v := fmtVec3(blenderTranslation(t))
+		c := handler.DiffChange{Path: "translation", Label: "translation", Kind: kind}
+		if kind == handler.Added {
+			c.After = v
+		} else {
+			c.Before = v
+		}
+		changes = append(changes, c)
+	}
+
+	if r := n.RotationOrDefault(); !nearEq4(r, gltf.DefaultRotation) {
+		v := fmtRot(r)
+		c := handler.DiffChange{Path: "rotation", Label: "rotation", Kind: kind}
+		if kind == handler.Added {
+			c.After = v
+		} else {
+			c.Before = v
+		}
+		changes = append(changes, c)
+	}
+
+	if s := n.ScaleOrDefault(); !nearEq3(s, gltf.DefaultScale) {
+		v := fmtVec3(blenderScale(s))
+		c := handler.DiffChange{Path: "scale", Label: "scale", Kind: kind}
+		if kind == handler.Added {
+			c.After = v
+		} else {
+			c.Before = v
+		}
+		changes = append(changes, c)
+	}
+
+	if m := ptrLabel(n.Mesh, "mesh"); m != "" {
+		c := handler.DiffChange{Path: "mesh", Label: "mesh", Kind: kind}
+		if kind == handler.Added {
+			c.After = m
+		} else {
+			c.Before = m
+		}
+		changes = append(changes, c)
 	}
 
 	return changes
@@ -1163,35 +1216,6 @@ func nearEq4(a, b [4]float64) bool {
 
 // fmtF formats a float64 using float32 precision (matches GLB binary storage).
 
-// quatToEulerXYZ converts a glTF quaternion [x,y,z,w] to XYZ Euler angles in
-// degrees. Quaternions are orientation-only (no winding count), so a value like
-// "594°" from a DCC tool becomes its equivalent orientation in [-180°, 180°].
-func quatToEulerXYZ(q [4]float64) [3]float64 {
-	qx, qy, qz, qw := q[0], q[1], q[2], q[3]
-	const toDeg = 180.0 / math.Pi
-
-	// X (roll)
-	sinr := 2 * (qw*qx + qy*qz)
-	cosr := 1 - 2*(qx*qx+qy*qy)
-	x := math.Atan2(sinr, cosr) * toDeg
-
-	// Y (pitch) — clamp to avoid NaN at poles
-	sinp := 2 * (qw*qy - qz*qx)
-	if sinp > 1 {
-		sinp = 1
-	} else if sinp < -1 {
-		sinp = -1
-	}
-	y := math.Asin(sinp) * toDeg
-
-	// Z (yaw)
-	siny := 2 * (qw*qz + qx*qy)
-	cosy := 1 - 2*(qy*qy+qz*qz)
-	z := math.Atan2(siny, cosy) * toDeg
-
-	return [3]float64{x, y, z}
-}
-
 // blenderTranslation converts a glTF XYZ translation to Blender's coordinate
 // space so the diff output matches what the artist sees in their DCC tool.
 // Blender X = glTF X,  Blender Y = −glTF Z,  Blender Z = glTF Y
@@ -1208,15 +1232,86 @@ func blenderTranslation(v [3]float64) [3]float64 {
 func blenderScale(v [3]float64) [3]float64 { return [3]float64{v[0], v[2], v[1]} }
 
 // fmtRot formats a quaternion as human-readable Euler degrees in Blender space.
-// glTF Euler XYZ → Blender Euler: X=X, Y=Z, Z=Y
+// Correct conversion: quat → rotation matrix (glTF) → transform to Blender
+// coordinate space → extract intrinsic XYZ Euler angles.
 func fmtRot(q [4]float64) string {
-	e := quatToEulerXYZ(q)
-	b := [3]float64{e[0], e[2], e[1]}
-	return fmt.Sprintf("(%s° %s° %s°)", fmtF(b[0]), fmtF(b[1]), fmtF(b[2]))
+	e := quatToBlenderEulerDeg(q)
+	return fmt.Sprintf("(%.2f° %.2f° %.2f°)", e[0], e[1], e[2])
+}
+
+// quatToBlenderEulerDeg converts a glTF quaternion to Euler XYZ angles in
+// Blender's coordinate space (Z-up, Y-forward), in degrees.
+//
+// glTF uses Y-up right-handed; Blender uses Z-up right-handed.
+// The transform from glTF to Blender space:
+//
+//	R_b2g = [[1,0,0],[0,0,1],[0,-1,0]]  (Blender→glTF)
+//	R_g2b = R_b2g^T                      (glTF→Blender)
+//	M_blender = R_g2b * M_gltf * R_b2g
+func quatToBlenderEulerDeg(q [4]float64) [3]float64 {
+	m := quatToMatrix(q)
+
+	// R_b2g and its transpose R_g2b
+	rb2g := [3][3]float64{{1, 0, 0}, {0, 0, 1}, {0, -1, 0}}
+	rg2b := [3][3]float64{{1, 0, 0}, {0, 0, -1}, {0, 1, 0}}
+
+	mb := mat3Mul(mat3Mul(rg2b, m), rb2g)
+	e := mat3ToEulerXYZ(mb)
+
+	const toDeg = 180.0 / math.Pi
+	return [3]float64{e[0] * toDeg, e[1] * toDeg, e[2] * toDeg}
+}
+
+func quatToMatrix(q [4]float64) [3][3]float64 {
+	x, y, z, w := q[0], q[1], q[2], q[3]
+	return [3][3]float64{
+		{1 - 2*(y*y+z*z), 2*(x*y - w*z), 2*(x*z + w*y)},
+		{2*(x*y + w*z), 1 - 2*(x*x+z*z), 2*(y*z - w*x)},
+		{2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x*x+y*y)},
+	}
+}
+
+func mat3Mul(a, b [3][3]float64) [3][3]float64 {
+	var c [3][3]float64
+	for i := range 3 {
+		for j := range 3 {
+			for k := range 3 {
+				c[i][j] += a[i][k] * b[k][j]
+			}
+		}
+	}
+	return c
+}
+
+// mat3ToEulerXYZ extracts intrinsic XYZ Euler angles (radians) from a
+// rotation matrix. Intrinsic XYZ = M = Rz(γ)·Ry(β)·Rx(α).
+func mat3ToEulerXYZ(m [3][3]float64) [3]float64 {
+	beta := math.Asin(-clampF(m[2][0], -1, 1))
+	cosBeta := math.Cos(beta)
+	var alpha, gamma float64
+	if math.Abs(cosBeta) > 1e-6 {
+		alpha = math.Atan2(m[2][1], m[2][2])
+		gamma = math.Atan2(m[1][0], m[0][0])
+	} else {
+		// Gimbal lock: only α+γ or α-γ is determined.
+		alpha = math.Atan2(-m[1][2], m[1][1])
+		gamma = 0
+	}
+	return [3]float64{alpha, beta, gamma}
+}
+
+func clampF(v, lo, hi float64) float64 {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 func fmtF(v float64) string {
-	return strconv.FormatFloat(v, 'f', -1, 32)
+	return strconv.FormatFloat(v, 'f', 2, 32)
 }
 
 func fmtVec3(v [3]float64) string {

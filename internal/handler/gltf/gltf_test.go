@@ -80,7 +80,7 @@ func TestDiff_NodeTranslation(t *testing.T) {
 	// Translation is shown in Blender space: [x, -glTF_z, glTF_y]
 	// glTF [0,1.8,0] → Blender [0, 0, 1.8] (Y in glTF = Z in Blender)
 	// but here the change is on glTF Y (Blender Z), so Before=[0 0 0] After=[0 0 1.8]
-	if props[0].Before != "[0 0 0]" || props[0].After != "[0 0 1.8]" {
+	if props[0].Before != "[0.00 0.00 0.00]" || props[0].After != "[0.00 0.00 1.80]" {
 		t.Errorf("unexpected values: %v → %v", props[0].Before, props[0].After)
 	}
 }
@@ -178,7 +178,7 @@ func TestMerge_BothSidesChangeSameProperty_Conflict(t *testing.T) {
 	if ci == nil || len(ci.Conflicts) == 0 {
 		t.Fatal("expected conflict, got none")
 	}
-	if ci.Conflicts[0].Path != "nodes.Cube.translation" {
+	if ci.Conflicts[0].Path != "nodes/Cube/translation" {
 		t.Errorf("unexpected conflict path: %s", ci.Conflicts[0].Path)
 	}
 }
@@ -228,7 +228,7 @@ func TestMerge_TheirsRemovesNode_OursKept_Conflict(t *testing.T) {
 	if ci == nil || len(ci.Conflicts) == 0 {
 		t.Fatal("expected conflict for remove-vs-keep")
 	}
-	if ci.Conflicts[0].Path != "nodes.Lamp" {
+	if ci.Conflicts[0].Path != "nodes/Lamp" {
 		t.Errorf("unexpected conflict path: %s", ci.Conflicts[0].Path)
 	}
 }
@@ -261,7 +261,7 @@ func TestApplyChoices_TakeTheirsTranslation(t *testing.T) {
 	}
 
 	// User picks incoming (theirs) for the translation conflict.
-	result, err := h.ApplyChoices(merged, theirs, []string{"nodes.Cube.translation"})
+	result, err := h.ApplyChoices(merged, theirs, []string{"nodes/Cube/translation"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +316,7 @@ func TestApplyChoices_TakeTheirsRemovedNode(t *testing.T) {
 		t.Fatal("expected conflict")
 	}
 
-	result, err := h.ApplyChoices(merged, theirs, []string{"nodes.Lamp"})
+	result, err := h.ApplyChoices(merged, theirs, []string{"nodes/Lamp"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,22 +346,23 @@ func mesh(name string, primCount int) map[string]any {
 }
 
 func TestMergeMesh_TheirsAddsMesh(t *testing.T) {
+	// A mesh added only by theirs cannot be safely included in the merged document
+	// because its accessor indices reference theirs' accessor array, not ours'.
+	// The merge must be clean (no conflict) and keep ours' mesh count.
 	base := minDocWithMeshes([]any{mesh("Body", 1)})
 	ours := minDocWithMeshes([]any{mesh("Body", 1)})
 	theirs := minDocWithMeshes([]any{mesh("Body", 1), mesh("Wheel", 2)})
 
-	_, ci, err := New().Merge(base, ours, theirs)
+	result, ci, err := New().Merge(base, ours, theirs)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if ci != nil {
 		t.Errorf("expected clean merge, got conflicts: %v", ci.Conflicts)
 	}
-	doc, _ := parseDoc(minDocWithMeshes([]any{mesh("Body", 1), mesh("Wheel", 2)}))
-	result, _, _ := New().Merge(base, ours, theirs)
 	merged, _ := parseDoc(result)
-	if len(merged.Meshes) != len(doc.Meshes) {
-		t.Errorf("expected %d meshes, got %d", len(doc.Meshes), len(merged.Meshes))
+	if len(merged.Meshes) != 1 {
+		t.Errorf("expected 1 mesh (ours only), got %d", len(merged.Meshes))
 	}
 }
 
@@ -377,12 +378,14 @@ func TestMergeMesh_BothChangeSameMesh_Conflict(t *testing.T) {
 	if ci == nil || len(ci.Conflicts) == 0 {
 		t.Fatal("expected conflict for divergent mesh changes")
 	}
-	if ci.Conflicts[0].Path != "meshes.Body" {
+	if ci.Conflicts[0].Path != "meshes/Body" {
 		t.Errorf("unexpected conflict path: %s", ci.Conflicts[0].Path)
 	}
 }
 
 func TestMergeMesh_OnlyTheirsChangesMesh_Clean(t *testing.T) {
+	// When only theirs changed a mesh, we cannot safely take their version
+	// (accessor indices would dangle). The merge is clean but keeps ours.
 	base := minDocWithMeshes([]any{mesh("Body", 1)})
 	ours := minDocWithMeshes([]any{mesh("Body", 1)})   // ours unchanged
 	theirs := minDocWithMeshes([]any{mesh("Body", 3)}) // theirs changed
@@ -395,8 +398,8 @@ func TestMergeMesh_OnlyTheirsChangesMesh_Clean(t *testing.T) {
 		t.Errorf("expected clean merge, got conflicts: %v", ci.Conflicts)
 	}
 	merged, _ := parseDoc(result)
-	if len(merged.Meshes[0].Primitives) != 3 {
-		t.Errorf("expected theirs' 3 primitives, got %d", len(merged.Meshes[0].Primitives))
+	if len(merged.Meshes[0].Primitives) != 1 {
+		t.Errorf("expected ours' 1 primitive (conservative keep), got %d", len(merged.Meshes[0].Primitives))
 	}
 }
 
@@ -412,7 +415,7 @@ func TestMergeMesh_TheirsRemovesMesh_Conflict(t *testing.T) {
 	if ci == nil || len(ci.Conflicts) == 0 {
 		t.Fatal("expected conflict for remove-vs-keep")
 	}
-	if ci.Conflicts[0].Path != "meshes.Wheel" {
+	if ci.Conflicts[0].Path != "meshes/Wheel" {
 		t.Errorf("unexpected conflict path: %s", ci.Conflicts[0].Path)
 	}
 }
