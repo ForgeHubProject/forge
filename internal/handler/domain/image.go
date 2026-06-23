@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/yakupatahanov/forge/internal/handler"
+	"github.com/forgehubproject/forge/internal/handler"
 )
 
 // Extensions covered by the image domain.
