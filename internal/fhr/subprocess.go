@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/yakupatahanov/forge/internal/handler"
+	"github.com/forgehubproject/forge/internal/handler"
 )
 
 // SubprocessHandler wraps an FHR handler binary as a ForgeHandler.

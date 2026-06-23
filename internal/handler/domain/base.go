@@ -2,7 +2,7 @@
 // implementations (ThreeDDomain, ImageDomain).
 package domain
 
-import "github.com/yakupatahanov/forge/internal/handler"
+import "github.com/forgehubproject/forge/internal/handler"
 
 // BaseDomain is an embeddable struct that implements DomainRegister and
 // DomainResolve. Concrete domains embed it and supply Match, Diff, Merge,
