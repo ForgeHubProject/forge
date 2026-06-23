@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yakupatahanov/forge/internal/handler"
+	"github.com/forgehubproject/forge/internal/handler"
 )
 
 var h = New()
@@ -107,7 +107,7 @@ func TestMerge_NoChanges(t *testing.T) {
 	assertContent(t, merged, "unchanged\n")
 }
 
-// ── helpers ───────────────────────────────────────────────────────────────────
+// ── helpers ────────────────────────────────────────────────────────────────────────────────
 
 func assertNoError(t *testing.T, err error) {
 	t.Helper()
