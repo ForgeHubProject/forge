@@ -19,6 +19,7 @@ import (
 	gogithttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	gogitssh "github.com/go-git/go-git/v5/plumbing/transport/ssh"
 	"github.com/spf13/cobra"
+	"github.com/yakupatahanov/forge/internal/fhr"
 	"github.com/yakupatahanov/forge/internal/gitrepo"
 	"github.com/yakupatahanov/forge/internal/handler"
 	"github.com/yakupatahanov/forge/internal/handler/domain"
@@ -50,6 +51,8 @@ func rootCmd() *cobra.Command {
 		logCmd(),
 		pushCmd(),
 		pullCmd(),
+		sourceCmd(),
+		formatsCmd(),
 		gitPassthrough("add", "Stage file contents (delegates to git)"),
 		gitPassthrough("commit", "Record staged changes (delegates to git)"),
 		gitPassthrough("branch", "List, create or delete branches (delegates to git)"),
@@ -66,12 +69,23 @@ func rootCmd() *cobra.Command {
 	return root
 }
 
-// defaultRegistry builds the handler registry with official domains and handlers.
-// Domains are checked before the TextHandler catch-all.
-// Within each domain, specific handlers are registered most-specific first.
+// defaultRegistry builds the handler registry.
+// External handlers from ~/.forge/plugins are checked first (highest priority),
+// then built-in domain handlers, then the text catch-all.
 func defaultRegistry() *handler.Registry {
 	reg := handler.NewRegistry()
 
+	// External FHR handlers take priority over built-ins.
+	for _, meta := range fhr.LoadInstalledHandlers() {
+		binary := fhr.InstalledHandlerBinary(meta.ID)
+		if binary == "" {
+			fmt.Fprintf(os.Stderr, "forge: warning: handler %q metadata found but binary missing\n", meta.ID)
+			continue
+		}
+		reg.Register(fhr.NewSubprocessHandler(binary, meta))
+	}
+
+	// Built-in handlers as fallback.
 	threeD := domain.NewThreeD()
 	threeD.DomainRegister(forgegltf.New())
 	reg.Register(threeD)
@@ -393,6 +407,7 @@ func printMergeStatus() {
 //	[3d › gltf]   — domain + specific handler
 //	[3d]          — domain fallback (no specific handler installed)
 //	[text]        — standalone catch-all
+//	[gltf-scene]  — external FHR handler
 func handlerLabel(path string, reg *handler.Registry) string {
 	dom, h, err := reg.ResolveFull(path)
 	if err != nil {
@@ -413,7 +428,7 @@ func handlerLabel(path string, reg *handler.Registry) string {
 		return fmt.Sprintf("\x1b[36m[%s › %s]\x1b[0m", domName, handlerName)
 	}
 
-	// Standalone handler (e.g. TextHandler).
+	// Standalone handler (text catch-all or external FHR handler).
 	return fmt.Sprintf("\x1b[36m[%s]\x1b[0m", handlerName)
 }
 
@@ -892,18 +907,12 @@ func findConflictedFiles(root string) ([]string, error) {
 	}
 
 	sort.Strings(conflicted)
-
-	// Remove orphaned sidecars written to git temp file paths (e.g.
-	// Remove any orphaned .forge-conflict sidecars (temp-path or real-path)
-	// that have no corresponding unresolved file in the index any more.
 	cleanupForgeConflictSidecars(root)
 
 	return conflicted, nil
 }
 
 // cleanupForgeConflictSidecars removes all *.forge-conflict files under root.
-// This covers both properly-named sidecars (Untitled.glb.forge-conflict) and
-// orphaned temp-path sidecars (.merge_file_XXXXXX.forge-conflict).
 func cleanupForgeConflictSidecars(root string) {
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
@@ -925,15 +934,15 @@ func hasConflictMarkers(path string) bool {
 	return bytes.Contains(data, []byte("<<<<<<<"))
 }
 
-// isBinaryHandler returns true for handlers that produce binary output (not
-// text conflict markers), meaning resolution must happen in an external tool.
+// isBinaryHandler returns true for handlers whose output is binary (not text
+// conflict markers), meaning conflict resolution requires an external tool.
 func isBinaryHandler(h handler.ForgeHandler) bool {
 	n, ok := h.(handler.Namer)
 	if !ok {
 		return false
 	}
 	switch n.Format() {
-	case "gltf", "3d", "image":
+	case "gltf", "gltf-scene", "3d", "image":
 		return true
 	}
 	return false
@@ -1077,8 +1086,7 @@ func applyConflictChoices(path, sidecarPath string, sc handler.ConflictSidecar, 
 }
 
 // cleanupMergeTempFiles removes the _BASE_PID, _LOCAL_PID, _REMOTE_PID, and
-// _BACKUP_PID temp files that git's merge driver infrastructure leaves in the
-// working directory when a merge driver exits with a non-zero status.
+// _BACKUP_PID temp files that git's merge driver infrastructure leaves behind.
 func cleanupMergeTempFiles(path string) {
 	dir := filepath.Dir(path)
 	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
@@ -1102,8 +1110,7 @@ func promptConfirm(prompt string) bool {
 
 // runSemanticMergeFromIndex extracts the :1: (base), :2: (ours), :3: (theirs)
 // versions of path from the git index, runs the format handler's Merge(), and
-// writes the merged result plus a .forge-conflict sidecar — exactly what
-// forge merge-file would have done had it been the configured merge driver.
+// writes the merged result plus a .forge-conflict sidecar.
 func runSemanticMergeFromIndex(path string, h handler.ForgeHandler) error {
 	readStage := func(stage int) ([]byte, error) {
 		data, err := exec.Command("git", "show", fmt.Sprintf(":%d:%s", stage, path)).Output()
@@ -1153,15 +1160,12 @@ func runSemanticMergeFromIndex(path string, h handler.ForgeHandler) error {
 }
 
 // resolveMergeTool returns the merge tool to use.
-// Precedence: MERGE_TOOL → GIT_MERGETOOL → VISUAL → EDITOR →
-// first available tool from git's built-in auto-detection list → "vi".
 func resolveMergeTool() string {
 	for _, env := range []string{"MERGE_TOOL", "GIT_MERGETOOL", "VISUAL", "EDITOR"} {
 		if v := os.Getenv(env); v != "" {
 			return v
 		}
 	}
-	// Mirror git's built-in auto-detection order.
 	builtins := []string{
 		"meld", "opendiff", "kdiff3", "tkdiff", "xxdiff",
 		"tortoisemerge", "gvimdiff", "diffuse", "diffmerge",
@@ -1176,16 +1180,13 @@ func resolveMergeTool() string {
 	return "vi"
 }
 
-// threeWayTools lists GUI diff tools that accept positional (local, merged, remote) args
-// and render a proper 3-pane conflict view when given all three.
+// threeWayTools lists GUI diff tools that accept positional (local, merged, remote) args.
 var threeWayTools = map[string]bool{
 	"meld": true, "kdiff3": true, "xxdiff": true, "diffuse": true,
 	"tkdiff": true, "diffmerge": true, "bc": true, "bcompare": true,
 }
 
-// openInMergeTool opens path in the given tool. For 3-way capable tools it
-// extracts LOCAL and REMOTE from git's index and passes all three files so
-// the tool shows a proper conflict view instead of raw markers.
+// openInMergeTool opens path in the given tool.
 func openInMergeTool(tool, path string) error {
 	args := []string{path}
 	var cleanup []string
@@ -1211,7 +1212,6 @@ func openInMergeTool(tool, path string) error {
 
 // extractConflictVersions writes the :2: (LOCAL/ours) and :3: (REMOTE/theirs)
 // index versions of path to temp files, returning their paths.
-// The caller is responsible for removing the files when done.
 func extractConflictVersions(path string) (localFile, remoteFile string, err error) {
 	localData, err := exec.Command("git", "show", ":2:"+path).Output()
 	if err != nil {
@@ -1277,14 +1277,11 @@ func runMerge(_ *cobra.Command, args []string) error {
 	err := c.Run()
 
 	if isAbort {
-		// Clean up any leftover .forge-conflict sidecars git doesn't know about.
 		cleanupForgeConflictSidecars(".")
 		return err
 	}
 
 	if err != nil {
-		// git merge exited non-zero — conflicts or error.
-		// Print a forge-aware hint on top of git's own output.
 		fmt.Fprintln(os.Stderr, "\nTo resolve conflicts run: forge mergetool")
 		fmt.Fprintln(os.Stderr, "Then: git add <files> && git commit")
 		os.Exit(c.ProcessState.ExitCode())
@@ -1310,9 +1307,6 @@ written into OURS so you can inspect and resolve them).`,
 
 func runMergeFile(_ *cobra.Command, args []string) error {
 	basePath, oursPath, theirsPath := cleanPath(args[0]), cleanPath(args[1]), cleanPath(args[2])
-	// %P (real working-tree path) is passed as an optional 4th arg by git's merge
-	// driver machinery. Without it the sidecar would be written next to the temp
-	// file git passes as %A, leaving an orphan instead of <realfile>.forge-conflict.
 	sidecarBase := oursPath
 	if len(args) == 4 {
 		sidecarBase = cleanPath(args[3])
@@ -1347,7 +1341,6 @@ func runMergeFile(_ *cobra.Command, args []string) error {
 	}
 
 	if ci != nil && len(ci.Conflicts) > 0 {
-		// Write structured sidecar so forge mergetool can drive interactive resolution.
 		format := "unknown"
 		if n, ok := h.(interface{ Format() string }); ok {
 			format = n.Format()
@@ -1372,12 +1365,215 @@ func runMergeFile(_ *cobra.Command, args []string) error {
 	return nil
 }
 
+// ── forge source ──────────────────────────────────────────────────────────────
+
+func sourceCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "source",
+		Short: "Manage FHR handler sources",
+	}
+	cmd.AddCommand(sourceAddCmd(), sourceListCmd(), sourceUpdateCmd())
+	return cmd
+}
+
+func sourceAddCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "add <url>",
+		Short: "Add a handler source and fetch its manifest",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runSourceAdd,
+	}
+	cmd.Flags().String("name", "", "Short name for this source (default: derived from URL)")
+	return cmd
+}
+
+func runSourceAdd(cmd *cobra.Command, args []string) error {
+	rawURL := args[0]
+	name, _ := cmd.Flags().GetString("name")
+	if name == "" {
+		name = deriveSourceName(rawURL)
+	}
+
+	fmt.Printf("Fetching manifest from %s...\n", rawURL)
+	m, err := fhr.FetchManifest(rawURL)
+	if err != nil {
+		return err
+	}
+
+	if err := fhr.AddSource(name, rawURL); err != nil {
+		return err
+	}
+
+	var exts []string
+	for ext := range m.Formats {
+		exts = append(exts, ext)
+	}
+	sort.Strings(exts)
+
+	fmt.Printf("Added source %q (%s)\n", name, m.Name)
+	fmt.Printf("Available formats: %s\n", strings.Join(exts, ", "))
+	fmt.Printf("Install a handler with: forge formats add <extension>\n")
+	return nil
+}
+
+func deriveSourceName(rawURL string) string {
+	parts := strings.Split(strings.TrimRight(rawURL, "/"), "/")
+	for i := len(parts) - 1; i >= 0; i-- {
+		p := parts[i]
+		if p != "" && p != "manifest.toml" && p != "main" && p != "master" {
+			return p
+		}
+	}
+	return "source"
+}
+
+func sourceListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List configured handler sources",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			sources, err := fhr.LoadSources()
+			if err != nil {
+				return err
+			}
+			if len(sources) == 0 {
+				fmt.Println("No sources configured.")
+				fmt.Println("Add one with: forge source add <url>")
+				return nil
+			}
+			for _, s := range sources {
+				fmt.Printf("%-20s %s\n", s.Name, s.URL)
+			}
+			return nil
+		},
+	}
+}
+
+func sourceUpdateCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "update [name]",
+		Short: "Re-fetch manifests to verify sources are reachable",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			sources, err := fhr.LoadSources()
+			if err != nil {
+				return err
+			}
+			if len(sources) == 0 {
+				fmt.Println("No sources configured.")
+				return nil
+			}
+			for _, s := range sources {
+				if len(args) == 1 && s.Name != args[0] {
+					continue
+				}
+				fmt.Printf("Checking %s (%s)... ", s.Name, s.URL)
+				if _, err := fhr.FetchManifest(s.URL); err != nil {
+					fmt.Printf("ERROR: %v\n", err)
+				} else {
+					fmt.Println("OK")
+				}
+			}
+			return nil
+		},
+	}
+}
+
+// ── forge formats ─────────────────────────────────────────────────────────────
+
+func formatsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "formats",
+		Short: "Manage installed format handlers",
+	}
+	cmd.AddCommand(formatsAddCmd(), formatsListCmd())
+	return cmd
+}
+
+func formatsAddCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "add <extension>",
+		Short: "Download and install a handler for a file extension",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runFormatsAdd,
+	}
+	cmd.Flags().String("source", "", "Source name to search (default: all configured sources)")
+	return cmd
+}
+
+func runFormatsAdd(cmd *cobra.Command, args []string) error {
+	ext := args[0]
+	if !strings.HasPrefix(ext, ".") {
+		ext = "." + ext
+	}
+	sourceName, _ := cmd.Flags().GetString("source")
+
+	sources, err := fhr.LoadSources()
+	if err != nil {
+		return err
+	}
+	if len(sources) == 0 {
+		return fmt.Errorf("no sources configured — run: forge source add <url>")
+	}
+	if sourceName != "" {
+		var found fhr.Source
+		for _, s := range sources {
+			if s.Name == sourceName {
+				found = s
+				break
+			}
+		}
+		if found.Name == "" {
+			return fmt.Errorf("source %q not found — run: forge source list", sourceName)
+		}
+		sources = []fhr.Source{found}
+	}
+
+	for _, src := range sources {
+		m, err := fhr.FetchManifest(src.URL)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "forge: warning: could not fetch source %q: %v\n", src.Name, err)
+			continue
+		}
+		handlerID, version, err := m.HandlerForExt(ext)
+		if err != nil {
+			continue
+		}
+		fmt.Printf("Found handler %q v%s in source %q\n", handlerID, version, src.Name)
+		binary, err := fhr.DownloadHandler(m, handlerID, version, src.URL)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Installed: %s\n", binary)
+		return nil
+	}
+	return fmt.Errorf("no handler found for %s in any configured source", ext)
+}
+
+func formatsListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List installed format handlers",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			handlers := fhr.LoadInstalledHandlers()
+			if len(handlers) == 0 {
+				fmt.Println("No external handlers installed.")
+				fmt.Println("Install one with: forge formats add <extension>")
+				return nil
+			}
+			fmt.Printf("%-20s %-10s %s\n", "HANDLER", "VERSION", "FORMATS")
+			for _, h := range handlers {
+				sort.Strings(h.Formats)
+				fmt.Printf("%-20s %-10s %s\n", h.ID, h.Version, strings.Join(h.Formats, ", "))
+			}
+			return nil
+		},
+	}
+}
+
 // ── forge log ─────────────────────────────────────────────────────────────────
 
 // ── git pass-throughs ─────────────────────────────────────────────────────────
-// gitPassthrough returns a cobra.Command that forwards all arguments verbatim
-// to the equivalent git sub-command. DisableFlagParsing lets flags like
-// --oneline or -m pass through without cobra trying to interpret them.
 
 func gitPassthrough(name, short string) *cobra.Command {
 	return &cobra.Command{
@@ -1417,4 +1613,3 @@ func delegateToGit(sub string) func(*cobra.Command, []string) error {
 		return c.Run()
 	}
 }
-
