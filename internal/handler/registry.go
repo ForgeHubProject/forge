@@ -1,6 +1,9 @@
 package handler
 
-import "fmt"
+import (
+	"fmt"
+	"path/filepath"
+)
 
 // Registry resolves a ForgeHandler for a given file path.
 // Entries may be standalone ForgeHandlers or Domains.
@@ -28,7 +31,7 @@ func (r *Registry) Resolve(path string) (ForgeHandler, error) {
 
 // Resolution holds the result of a full registry lookup.
 type Resolution struct {
-	Domain   Domain      // the matched domain, or nil for standalone handlers
+	Domain   Domain       // the matched domain, or nil for standalone handlers
 	Handler  ForgeHandler // the most specific handler (may equal Domain if no specific match)
 	Specific bool         // true if Handler is a dedicated format handler, not a domain fallback
 }
@@ -50,7 +53,7 @@ func (r *Registry) ResolveFull(path string) (Domain, ForgeHandler, error) {
 			return nil, entry, nil
 		}
 	}
-	return nil, nil, fmt.Errorf("no handler available for %q — install one with: forge domain install", path)
+	return nil, nil, fmt.Errorf("no handler for %q — install one with: forge formats add %s", path, filepath.Ext(path))
 }
 
 // Domains returns all Domain entries in the registry.

@@ -36,8 +36,12 @@ func PlatformKey() string {
 		return "darwin-arm64"
 	case goos == "darwin":
 		return "darwin-amd64"
+	case goos == "linux" && goarch == "arm64":
+		return "linux-arm64"
 	case goos == "linux":
 		return "linux-amd64"
+	case goos == "windows" && goarch == "arm64":
+		return "windows-arm64"
 	case goos == "windows":
 		return "windows-amd64"
 	default:
