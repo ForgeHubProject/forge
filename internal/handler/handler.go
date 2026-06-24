@@ -28,7 +28,6 @@ type DiffChange struct {
 }
 
 // StructuredDiff is the wire format returned by ForgeHandler.Diff.
-// Schema: docs/structured-diff-schema.json
 type StructuredDiff struct {
 	Version  string       `json:"version"`
 	Format   string       `json:"format"`
@@ -78,30 +77,6 @@ type ConflictSidecar struct {
 
 // ConflictApplier is an optional interface handlers may implement to support
 // interactive conflict resolution in forge mergetool.
-// Handlers that don't implement it fall back to the generic "resolve externally" message.
 type ConflictApplier interface {
-	// ApplyChoices patches merged (which holds "ours" for all conflicts) by
-	// replacing the values at takePaths with the corresponding values from theirs.
-	// Returns a valid, fully re-serialized output blob.
 	ApplyChoices(merged, theirs Blob, takePaths []string) (Blob, error)
-}
-
-// Domain groups a family of ForgeHandlers under a shared abstraction
-// (e.g. all 3D formats, all raster images). It is itself a ForgeHandler,
-// acting as the domain-level fallback when no specific handler matches.
-//
-// Domains are the unit of installation: `forge domain install 3d` installs
-// the entire 3D domain and all its handlers.
-type Domain interface {
-	ForgeHandler
-	Namer // Format() returns the domain name, e.g. "3d", "image"
-
-	// DomainRegister adds a specific handler to this domain.
-	// Handlers are checked in registration order — most-specific first.
-	DomainRegister(h ForgeHandler)
-
-	// DomainResolve returns the most specific handler for path within this
-	// domain, or nil if no specific handler matches (caller uses the domain
-	// itself as the fallback).
-	DomainResolve(path string) ForgeHandler
 }
