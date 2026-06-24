@@ -1,4 +1,4 @@
-module github.com/yakupatahanov/forge
+module github.com/forgehubproject/forge
 
 go 1.25.0
 

@@ -13,7 +13,7 @@ import (
 	"strings"
 
 	"github.com/qmuntal/gltf"
-	"github.com/yakupatahanov/forge/internal/handler"
+	"github.com/forgehubproject/forge/internal/handler"
 )
 
 // Handler is the glTF/GLB format handler.
@@ -99,7 +99,7 @@ func (h *Handler) Merge(base, ours, theirs handler.Blob) (handler.Blob, *handler
 	return result, ci, nil
 }
 
-// ── merge: nodes ──────────────────────────────────────────────────────────────
+// ── merge: nodes ────────────────────────────────────────────────────────────────────────────────
 
 func mergeNodeList(base, ours, theirs []*gltf.Node, conflicts *[]handler.SemanticConflict) []*gltf.Node {
 	baseMap, _ := nodeMap(base)
@@ -254,7 +254,7 @@ func cloneNode(n *gltf.Node) *gltf.Node {
 	return &c
 }
 
-// ── merge: materials ──────────────────────────────────────────────────────────
+// ── merge: materials ────────────────────────────────────────────────────────────────────────────
 
 func mergeMaterialList(base, ours, theirs []*gltf.Material, conflicts *[]handler.SemanticConflict) []*gltf.Material {
 	baseMap, _ := materialMap(base)
@@ -427,7 +427,7 @@ func setRoughness(m *gltf.Material, v float64) {
 	m.PBRMetallicRoughness.RoughnessFactor = &v
 }
 
-// ── merge: meshes ─────────────────────────────────────────────────────────────
+// ── merge: meshes ─────────────────────────────────────────────────────────────────────────────
 
 // mergeMeshList detects 3-way conflicts on mesh arrays but always returns ours
 // unchanged. Meshes reference accessors/bufferViews/buffers by integer index;
@@ -476,7 +476,7 @@ func mergeMeshList(base, ours, theirs []*gltf.Mesh, conflicts *[]handler.Semanti
 	return ours
 }
 
-// ── merge: animations ─────────────────────────────────────────────────────────
+// ── merge: animations ───────────────────────────────────────────────────────────────────────────
 
 // mergeAnimationList detects 3-way conflicts on animation arrays but always
 // returns ours unchanged. Animations reference accessors for sampler data;
@@ -537,7 +537,7 @@ func jsonEqual(a, b any) bool {
 	return bytes.Equal(aj, bj)
 }
 
-// ── conflict resolution ───────────────────────────────────────────────────────
+// ── conflict resolution ─────────────────────────────────────────────────────────────────────────
 
 // ApplyChoices implements handler.ConflictApplier.
 // merged already holds "ours" for every conflict; takePaths lists the conflict
@@ -670,7 +670,7 @@ func removeMaterial(mats []*gltf.Material, name string) []*gltf.Material {
 	return out
 }
 
-// ── serialisation ─────────────────────────────────────────────────────────────
+// ── serialisation ────────────────────────────────────────────────────────────────────────────────
 
 // isGLB returns true if the blob starts with the GLB magic bytes ("glTF").
 func isGLB(blob handler.Blob) bool {
@@ -732,7 +732,7 @@ func parseDoc(blob handler.Blob) (*gltf.Document, error) {
 	return doc, nil
 }
 
-// ── nodes ─────────────────────────────────────────────────────────────────────
+// ── nodes ──────────────────────────────────────────────────────────────────────────────────
 
 func diffNodes(a, b *gltf.Document) *handler.DiffChange {
 	aMap, aOrder := nodeMap(a.Nodes)
@@ -904,7 +904,7 @@ func nodePropsOneSide(n *gltf.Node, kind handler.ChangeKind) []handler.DiffChang
 	return changes
 }
 
-// ── materials ─────────────────────────────────────────────────────────────────
+// ── materials ─────────────────────────────────────────────────────────────────────────────
 
 func diffMaterials(a, b *gltf.Document) *handler.DiffChange {
 	aMap, aOrder := materialMap(a.Materials)
@@ -1038,7 +1038,7 @@ func pbrOrDefault(m *gltf.Material) *gltf.PBRMetallicRoughness {
 	return &gltf.PBRMetallicRoughness{}
 }
 
-// ── meshes ────────────────────────────────────────────────────────────────────
+// ── meshes ──────────────────────────────────────────────────────────────────────────────────
 
 func diffMeshes(a, b *gltf.Document) *handler.DiffChange {
 	aMap, aOrder := meshMap(a.Meshes)
@@ -1120,7 +1120,7 @@ func meshName(m *gltf.Mesh, i int) string {
 	return fmt.Sprintf("mesh[%d]", i)
 }
 
-// ── animations ────────────────────────────────────────────────────────────────
+// ── animations ─────────────────────────────────────────────────────────────────────────────
 
 func diffAnimations(a, b *gltf.Document) *handler.DiffChange {
 	aMap, aOrder := animMap(a.Animations)
@@ -1202,7 +1202,7 @@ func animName(a *gltf.Animation, i int) string {
 	return fmt.Sprintf("anim[%d]", i)
 }
 
-// ── formatting helpers ────────────────────────────────────────────────────────
+// ── formatting helpers ──────────────────────────────────────────────────────────────────────────
 
 const eps = 1e-5
 

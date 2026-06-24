@@ -19,13 +19,13 @@ import (
 	gogithttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	gogitssh "github.com/go-git/go-git/v5/plumbing/transport/ssh"
 	"github.com/spf13/cobra"
-	"github.com/yakupatahanov/forge/internal/fhr"
-	"github.com/yakupatahanov/forge/internal/gitrepo"
-	"github.com/yakupatahanov/forge/internal/handler"
-	"github.com/yakupatahanov/forge/internal/handler/domain"
-	forgegltf "github.com/yakupatahanov/forge/internal/handler/gltf"
-	"github.com/yakupatahanov/forge/internal/handler/text"
-	"github.com/yakupatahanov/forge/internal/manifest"
+	"github.com/forgehubproject/forge/internal/fhr"
+	"github.com/forgehubproject/forge/internal/gitrepo"
+	"github.com/forgehubproject/forge/internal/handler"
+	"github.com/forgehubproject/forge/internal/handler/domain"
+	forgegltf "github.com/forgehubproject/forge/internal/handler/gltf"
+	"github.com/forgehubproject/forge/internal/handler/text"
+	"github.com/forgehubproject/forge/internal/manifest"
 )
 
 func main() {
@@ -95,7 +95,7 @@ func defaultRegistry() *handler.Registry {
 	return reg
 }
 
-// ── forge init ────────────────────────────────────────────────────────────────
+// ── forge init ────────────────────────────────────────────────────────────────────────────────
 
 func initCmd() *cobra.Command {
 	return &cobra.Command{
@@ -172,7 +172,7 @@ func setupGitMergeDriver(repoDir string) error {
 	return nil
 }
 
-// ── forge status ──────────────────────────────────────────────────────────────
+// ── forge status ────────────────────────────────────────────────────────────────────────────
 
 func statusCmd() *cobra.Command {
 	return &cobra.Command{
@@ -432,7 +432,7 @@ func handlerLabel(path string, reg *handler.Registry) string {
 	return fmt.Sprintf("\x1b[36m[%s]\x1b[0m", handlerName)
 }
 
-// ── forge clone ───────────────────────────────────────────────────────────────
+// ── forge clone ─────────────────────────────────────────────────────────────────────────────
 
 func cloneCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -605,7 +605,7 @@ func repoNameFromURL(url string) string {
 	url = strings.TrimRight(url, "/")
 	url = strings.TrimSuffix(url, ".git")
 	// Take the last path segment (works for https:// and git@host:user/repo).
-	if i := strings.LastIndexAny(url, "/:"); i >= 0 {
+	if i := strings.LastIndexAny(url, "/:'"); i >= 0 {
 		url = url[i+1:]
 	}
 	if url == "" {
@@ -614,7 +614,7 @@ func repoNameFromURL(url string) string {
 	return url
 }
 
-// ── forge diff ────────────────────────────────────────────────────────────────
+// ── forge diff ─────────────────────────────────────────────────────────────────────────────
 
 func diffCmd() *cobra.Command {
 	return &cobra.Command{
@@ -660,7 +660,7 @@ func runDiff(cmd *cobra.Command, args []string) error {
 }
 
 // cleanPath normalises a user-supplied file path for use with go-git and git
-// commands. It removes leading ./ and .\ (common from PowerShell tab-completion)
+// commands. It removes leading ./ and .\\ (common from PowerShell tab-completion)
 // and converts backslashes to forward slashes.
 func cleanPath(p string) string {
 	return filepath.ToSlash(filepath.Clean(p))
@@ -770,7 +770,7 @@ func renderChanges(changes []handler.DiffChange, connPrefix, contPrefix string) 
 	}
 }
 
-// ── forge mergetool ───────────────────────────────────────────────────────────
+// ── forge mergetool ──────────────────────────────────────────────────────────────────────────
 
 func mergeToolCmd() *cobra.Command {
 	return &cobra.Command{
@@ -1250,7 +1250,7 @@ func extractConflictVersions(path string) (localFile, remoteFile string, err err
 	return lf.Name(), rf.Name(), nil
 }
 
-// ── forge merge ───────────────────────────────────────────────────────────────
+// ── forge merge ────────────────────────────────────────────────────────────────────────────
 
 func mergeCmd() *cobra.Command {
 	return &cobra.Command{
@@ -1289,7 +1289,7 @@ func runMerge(_ *cobra.Command, args []string) error {
 	return nil
 }
 
-// ── forge merge-file ──────────────────────────────────────────────────────────
+// ── forge merge-file ───────────────────────────────────────────────────────────────────────────
 
 func mergeFileCmd() *cobra.Command {
 	return &cobra.Command{
@@ -1365,7 +1365,7 @@ func runMergeFile(_ *cobra.Command, args []string) error {
 	return nil
 }
 
-// ── forge source ──────────────────────────────────────────────────────────────
+// ── forge source ───────────────────────────────────────────────────────────────────────────
 
 func sourceCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -1479,7 +1479,7 @@ func sourceUpdateCmd() *cobra.Command {
 	}
 }
 
-// ── forge formats ─────────────────────────────────────────────────────────────
+// ── forge formats ────────────────────────────────────────────────────────────────────────────
 
 func formatsCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -1571,9 +1571,9 @@ func formatsListCmd() *cobra.Command {
 	}
 }
 
-// ── forge log ─────────────────────────────────────────────────────────────────
+// ── forge log ────────────────────────────────────────────────────────────────────────────────
 
-// ── git pass-throughs ─────────────────────────────────────────────────────────
+// ── git pass-throughs ────────────────────────────────────────────────────────────────────────────
 
 func gitPassthrough(name, short string) *cobra.Command {
 	return &cobra.Command{
@@ -1594,7 +1594,7 @@ func logCmd() *cobra.Command {
 	return gitPassthrough("log", "Show commit log (delegates to git)")
 }
 
-// ── forge push / pull ─────────────────────────────────────────────────────────
+// ── forge push / pull ─────────────────────────────────────────────────────────────────────────
 
 func pushCmd() *cobra.Command {
 	return gitPassthrough("push", "Push to remote (delegates to git)")
