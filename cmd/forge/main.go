@@ -586,7 +586,7 @@ func reportMissingHandlers(repoDir string) {
 func repoNameFromURL(url string) string {
 	url = strings.TrimRight(url, "/")
 	url = strings.TrimSuffix(url, ".git")
-	if i := strings.LastIndexAny(url, "/:'"); i >= 0 {
+	if i := strings.LastIndexAny(url, "/:'" + `"`); i >= 0 {
 		url = url[i+1:]
 	}
 	if url == "" {
@@ -1413,16 +1413,51 @@ func sourceUpdateCmd() *cobra.Command {
 func formatsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "formats",
-		Short: "Manage installed format handlers",
+		Short: "Manage format handlers for this repository",
+		RunE:  runFormats,
 	}
-	cmd.AddCommand(formatsAddCmd(), formatsListCmd())
+	cmd.AddCommand(formatsAddCmd(), formatsRemoveCmd(), formatsUpdateCmd(), formatsListCmd())
 	return cmd
+}
+
+// runFormats lists extensions in .forge-formats and their handler installation status.
+func runFormats(_ *cobra.Command, _ []string) error {
+	repoDir := findRepoRoot()
+	forgeFormats := loadForgeFormats(repoDir)
+	if len(forgeFormats) == 0 {
+		fmt.Println("No formats configured for this repository.")
+		fmt.Println("Add one with: forge formats add <extension>")
+		return nil
+	}
+
+	installed := map[string]fhr.InstalledMeta{}
+	for _, meta := range fhr.LoadInstalledHandlers() {
+		for _, ext := range meta.Formats {
+			installed[strings.ToLower(ext)] = meta
+		}
+	}
+
+	exts := make([]string, 0, len(forgeFormats))
+	for ext := range forgeFormats {
+		exts = append(exts, ext)
+	}
+	sort.Strings(exts)
+
+	fmt.Printf("%-12s  %-12s  %s\n", "EXTENSION", "STATUS", "HANDLER")
+	for _, ext := range exts {
+		if meta, ok := installed[ext]; ok {
+			fmt.Printf("%-12s  %-12s  %s v%s\n", ext, "installed", meta.ID, meta.Version)
+		} else {
+			fmt.Printf("%-12s  %-12s  (run: forge formats add %s)\n", ext, "missing", ext)
+		}
+	}
+	return nil
 }
 
 func formatsAddCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "add <extension>",
-		Short: "Download and install a handler for a file extension",
+		Short: "Add a format to this repo and install its handler",
 		Args:  cobra.ExactArgs(1),
 		RunE:  runFormatsAdd,
 	}
@@ -1435,14 +1470,22 @@ func runFormatsAdd(cmd *cobra.Command, args []string) error {
 	if !strings.HasPrefix(ext, ".") {
 		ext = "." + ext
 	}
+	ext = strings.ToLower(ext)
 	sourceName, _ := cmd.Flags().GetString("source")
+
+	repoDir := findRepoRoot()
+	if err := addToForgeFormats(repoDir, ext); err != nil {
+		return fmt.Errorf("updating .forge-formats: %w", err)
+	}
 
 	sources, err := fhr.LoadSources()
 	if err != nil {
 		return err
 	}
 	if len(sources) == 0 {
-		return fmt.Errorf("no sources configured — run: forge source add <url>")
+		fmt.Printf("Added %s to .forge-formats\n", ext)
+		fmt.Println("No handler sources configured — run: forge source add <url>")
+		return nil
 	}
 	if sourceName != "" {
 		var found fhr.Source
@@ -1474,15 +1517,195 @@ func runFormatsAdd(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		fmt.Printf("Installed: %s\n", binary)
+		if err := setupGitMergeDriver(repoDir); err != nil {
+			fmt.Fprintf(os.Stderr, "forge: warning: could not update .gitattributes: %v\n", err)
+		}
+		fmt.Printf("Added %s to .forge-formats\n", ext)
 		return nil
 	}
-	return fmt.Errorf("no handler found for %s in any configured source", ext)
+
+	fmt.Printf("Added %s to .forge-formats\n", ext)
+	fmt.Printf("No handler found for %s in any configured source.\n", ext)
+	return nil
+}
+
+// addToForgeFormats appends ext to .forge-formats if not already present.
+func addToForgeFormats(repoDir, ext string) error {
+	path := filepath.Join(repoDir, ".forge-formats")
+	existing, _ := os.ReadFile(path)
+	for _, line := range strings.Split(string(existing), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if !strings.HasPrefix(line, ".") {
+			line = "." + line
+		}
+		if strings.ToLower(line) == ext {
+			return nil
+		}
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if len(existing) > 0 && !bytes.HasSuffix(existing, []byte("\n")) {
+		fmt.Fprintln(f)
+	}
+	fmt.Fprintln(f, ext)
+	return nil
+}
+
+func formatsRemoveCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "remove <extension>",
+		Short: "Remove a format from this repository's .forge-formats",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runFormatsRemove,
+	}
+}
+
+func runFormatsRemove(_ *cobra.Command, args []string) error {
+	ext := args[0]
+	if !strings.HasPrefix(ext, ".") {
+		ext = "." + ext
+	}
+	ext = strings.ToLower(ext)
+
+	repoDir := findRepoRoot()
+	if err := removeFromForgeFormats(repoDir, ext); err != nil {
+		return err
+	}
+	if err := removeFromGitAttributes(repoDir, ext); err != nil {
+		fmt.Fprintf(os.Stderr, "forge: warning: could not update .gitattributes: %v\n", err)
+	}
+	fmt.Printf("Removed %s from .forge-formats\n", ext)
+	return nil
+}
+
+// removeFromForgeFormats removes ext from .forge-formats, preserving comments and blank lines.
+func removeFromForgeFormats(repoDir, ext string) error {
+	path := filepath.Join(repoDir, ".forge-formats")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf(".forge-formats not found")
+	}
+	var out []string
+	found := false
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			out = append(out, line)
+			continue
+		}
+		normalized := trimmed
+		if !strings.HasPrefix(normalized, ".") {
+			normalized = "." + normalized
+		}
+		if strings.ToLower(normalized) == ext {
+			found = true
+			continue
+		}
+		out = append(out, line)
+	}
+	if !found {
+		return fmt.Errorf("%s is not in .forge-formats", ext)
+	}
+	return os.WriteFile(path, []byte(strings.Join(out, "\n")), 0644)
+}
+
+// removeFromGitAttributes removes the merge=forge entry for ext from .gitattributes.
+func removeFromGitAttributes(repoDir, ext string) error {
+	attrPath := filepath.Join(repoDir, ".gitattributes")
+	data, err := os.ReadFile(attrPath)
+	if err != nil {
+		return nil
+	}
+	prefix := "*" + ext
+	var out []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), prefix) {
+			continue
+		}
+		out = append(out, line)
+	}
+	return os.WriteFile(attrPath, []byte(strings.Join(out, "\n")), 0644)
+}
+
+func formatsUpdateCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "update [extension]",
+		Short: "Update installed handler(s) to the latest version from sources",
+		Args:  cobra.MaximumNArgs(1),
+		RunE:  runFormatsUpdate,
+	}
+}
+
+func runFormatsUpdate(_ *cobra.Command, args []string) error {
+	repoDir := findRepoRoot()
+	forgeFormats := loadForgeFormats(repoDir)
+
+	var targetExts []string
+	if len(args) == 1 {
+		ext := args[0]
+		if !strings.HasPrefix(ext, ".") {
+			ext = "." + ext
+		}
+		targetExts = []string{strings.ToLower(ext)}
+	} else {
+		for ext := range forgeFormats {
+			targetExts = append(targetExts, ext)
+		}
+		sort.Strings(targetExts)
+	}
+
+	if len(targetExts) == 0 {
+		fmt.Println("No formats configured. Add one with: forge formats add <extension>")
+		return nil
+	}
+
+	sources, err := fhr.LoadSources()
+	if err != nil {
+		return err
+	}
+	if len(sources) == 0 {
+		return fmt.Errorf("no sources configured — run: forge source add <url>")
+	}
+
+	for _, ext := range targetExts {
+		updated := false
+		for _, src := range sources {
+			m, err := fhr.FetchManifest(src.URL)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "forge: warning: could not fetch source %q: %v\n", src.Name, err)
+				continue
+			}
+			handlerID, version, err := m.HandlerForExt(ext)
+			if err != nil {
+				continue
+			}
+			fmt.Printf("Updating %s handler (%s v%s)...\n", ext, handlerID, version)
+			binary, err := fhr.DownloadHandler(m, handlerID, version, src.URL)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "forge: error updating %s: %v\n", ext, err)
+				continue
+			}
+			fmt.Printf("Updated: %s\n", binary)
+			updated = true
+			break
+		}
+		if !updated {
+			fmt.Fprintf(os.Stderr, "forge: no handler found for %s in any source\n", ext)
+		}
+	}
+	return nil
 }
 
 func formatsListCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
-		Short: "List installed format handlers",
+		Short: "List globally installed format handlers",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			handlers := fhr.LoadInstalledHandlers()
 			if len(handlers) == 0 {
