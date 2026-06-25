@@ -67,8 +67,6 @@ func rootCmd() *cobra.Command {
 }
 
 // defaultRegistry builds the handler registry for the current repo.
-// Extensions listed in .forge-formats activate their installed FHR handlers.
-// Everything else falls through to the text catch-all.
 func defaultRegistry() *handler.Registry {
 	reg := handler.NewRegistry()
 
@@ -81,7 +79,6 @@ func defaultRegistry() *handler.Registry {
 			fmt.Fprintf(os.Stderr, "forge: warning: handler %q metadata found but binary missing\n", meta.ID)
 			continue
 		}
-		// If .forge-formats exists, only activate handlers for listed extensions.
 		if len(forgeFormats) > 0 {
 			wanted := false
 			for _, ext := range meta.Formats {
@@ -97,11 +94,10 @@ func defaultRegistry() *handler.Registry {
 		reg.Register(fhr.NewSubprocessHandler(binary, meta))
 	}
 
-	reg.Register(text.New()) // catch-all — must be last
+	reg.Register(text.New())
 	return reg
 }
 
-// findRepoRoot returns the root of the current git repository, or "." if not in one.
 func findRepoRoot() string {
 	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
 	if err != nil {
@@ -110,9 +106,6 @@ func findRepoRoot() string {
 	return strings.TrimSpace(string(out))
 }
 
-// loadForgeFormats reads .forge-formats from repoDir and returns the set of
-// extensions (lower-cased, with leading dot) that this repo wants handled
-// semantically. Returns nil if the file does not exist.
 func loadForgeFormats(repoDir string) map[string]bool {
 	data, err := os.ReadFile(filepath.Join(repoDir, ".forge-formats"))
 	if err != nil {
@@ -132,7 +125,29 @@ func loadForgeFormats(repoDir string) map[string]bool {
 	return exts
 }
 
-// ── forge init ────────────────────────────────────────────────────────────────────────────────
+// loadForgeHandlers reads .forge-handlers and returns sourceURL → manifest hash.
+func loadForgeHandlers(repoDir string) map[string]string {
+	data, err := os.ReadFile(filepath.Join(repoDir, ".forge-handlers"))
+	if err != nil {
+		return map[string]string{}
+	}
+	var m map[string]string
+	if err := json.Unmarshal(data, &m); err != nil {
+		return map[string]string{}
+	}
+	return m
+}
+
+// saveForgeHandlers writes the .forge-handlers lockfile.
+func saveForgeHandlers(repoDir string, m map[string]string) error {
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(repoDir, ".forge-handlers"), append(data, '\n'), 0644)
+}
+
+// ── forge init ─────────────────────────────────────────────────────────────────────────────────
 
 func initCmd() *cobra.Command {
 	return &cobra.Command{
@@ -162,8 +177,6 @@ func runInit(_ *cobra.Command, args []string) error {
 	return nil
 }
 
-// setupGitMergeDriver registers the forge merge driver in .git/config and
-// adds .gitattributes entries for each extension listed in .forge-formats.
 func setupGitMergeDriver(repoDir string) error {
 	attrPath := filepath.Join(repoDir, ".gitattributes")
 	existing, _ := os.ReadFile(attrPath)
@@ -205,7 +218,7 @@ func setupGitMergeDriver(repoDir string) error {
 	return nil
 }
 
-// ── forge status ────────────────────────────────────────────────────────────────────────────
+// ── forge status ─────────────────────────────────────────────────────────────────────────
 
 func statusCmd() *cobra.Command {
 	return &cobra.Command{
@@ -344,7 +357,6 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	return nil
 }
 
-// handlerLabel returns a coloured handler annotation for a file path.
 func handlerLabel(path string, reg *handler.Registry) string {
 	h, err := reg.Resolve(path)
 	if err != nil {
@@ -357,7 +369,6 @@ func handlerLabel(path string, reg *handler.Registry) string {
 	return fmt.Sprintf("\x1b[36m[%s]\x1b[0m", name)
 }
 
-// printAheadBehind prints branch divergence info relative to the upstream.
 func printAheadBehind() {
 	upstreamOut, err := exec.Command("git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}").Output()
 	if err != nil {
@@ -391,7 +402,6 @@ func printAheadBehind() {
 	}
 }
 
-// printMergeStatus prints unmerged paths and hints during an active merge.
 func printMergeStatus() {
 	out, _ := exec.Command("git", "status", "--porcelain").Output()
 
@@ -441,7 +451,7 @@ func printMergeStatus() {
 	fmt.Println()
 }
 
-// ── forge clone ─────────────────────────────────────────────────────────────────────────────
+// ── forge clone ───────────────────────────────────────────────────────────────────────────
 
 func cloneCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -549,8 +559,6 @@ func defaultSSHKey() string {
 	return filepath.Join(home, ".ssh", "id_ed25519")
 }
 
-// reportMissingHandlers reads .forge-formats and warns about extensions that
-// have no installed FHR handler.
 func reportMissingHandlers(repoDir string) {
 	forgeFormats := loadForgeFormats(repoDir)
 	if len(forgeFormats) == 0 {
@@ -586,7 +594,7 @@ func reportMissingHandlers(repoDir string) {
 func repoNameFromURL(url string) string {
 	url = strings.TrimRight(url, "/")
 	url = strings.TrimSuffix(url, ".git")
-	if i := strings.LastIndexAny(url, "/:'" + `"`); i >= 0 {
+	if i := strings.LastIndexAny(url, "/:'"+`"`); i >= 0 {
 		url = url[i+1:]
 	}
 	if url == "" {
@@ -595,7 +603,7 @@ func repoNameFromURL(url string) string {
 	return url
 }
 
-// ── forge diff ─────────────────────────────────────────────────────────────────────────────
+// ── forge diff ───────────────────────────────────────────────────────────────────────────
 
 func diffCmd() *cobra.Command {
 	return &cobra.Command{
@@ -739,7 +747,7 @@ func renderChanges(changes []handler.DiffChange, connPrefix, contPrefix string) 
 	}
 }
 
-// ── forge mergetool ──────────────────────────────────────────────────────────────────────────
+// ── forge mergetool ────────────────────────────────────────────────────────────────────────────
 
 func mergeToolCmd() *cobra.Command {
 	return &cobra.Command{
@@ -891,7 +899,6 @@ func hasConflictMarkers(path string) bool {
 	return bytes.Contains(data, []byte("<<<<<<<"))
 }
 
-// isBinaryHandler returns true for any non-text handler (i.e. an FHR plugin).
 func isBinaryHandler(h handler.ForgeHandler) bool {
 	n, ok := h.(handler.Namer)
 	return ok && n.Format() != "text"
@@ -1219,7 +1226,7 @@ func runMerge(_ *cobra.Command, args []string) error {
 	return nil
 }
 
-// ── forge merge-file ───────────────────────────────────────────────────────────────────────────
+// ── forge merge-file ─────────────────────────────────────────────────────────────────────────────
 
 func mergeFileCmd() *cobra.Command {
 	return &cobra.Command{
@@ -1420,7 +1427,6 @@ func formatsCmd() *cobra.Command {
 	return cmd
 }
 
-// runFormats lists extensions in .forge-formats and their handler installation status.
 func runFormats(_ *cobra.Command, _ []string) error {
 	repoDir := findRepoRoot()
 	forgeFormats := loadForgeFormats(repoDir)
@@ -1446,7 +1452,7 @@ func runFormats(_ *cobra.Command, _ []string) error {
 	fmt.Printf("%-12s  %-12s  %s\n", "EXTENSION", "STATUS", "HANDLER")
 	for _, ext := range exts {
 		if meta, ok := installed[ext]; ok {
-			fmt.Printf("%-12s  %-12s  %s v%s\n", ext, "installed", meta.ID, meta.Version)
+			fmt.Printf("%-12s  %-12s  %s (%s)\n", ext, "installed", meta.ID, meta.Build)
 		} else {
 			fmt.Printf("%-12s  %-12s  (run: forge formats add %s)\n", ext, "missing", ext)
 		}
@@ -1502,23 +1508,28 @@ func runFormatsAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	for _, src := range sources {
-		m, err := fhr.FetchManifest(src.URL)
+		hash, m, err := fhr.FetchManifestWithHash(src.URL)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "forge: warning: could not fetch source %q: %v\n", src.Name, err)
 			continue
 		}
-		handlerID, version, err := m.HandlerForExt(ext)
+		handlerID, build, err := m.HandlerForExt(ext)
 		if err != nil {
 			continue
 		}
-		fmt.Printf("Found handler %q v%s in source %q\n", handlerID, version, src.Name)
-		binary, err := fhr.DownloadHandler(m, handlerID, version, src.URL)
+		fmt.Printf("Found handler %q (build %s) in source %q\n", handlerID, build, src.Name)
+		binary, err := fhr.DownloadHandler(m, handlerID, src.URL)
 		if err != nil {
 			return err
 		}
 		fmt.Printf("Installed: %s\n", binary)
 		if err := setupGitMergeDriver(repoDir); err != nil {
 			fmt.Fprintf(os.Stderr, "forge: warning: could not update .gitattributes: %v\n", err)
+		}
+		handlers := loadForgeHandlers(repoDir)
+		handlers[src.URL] = hash
+		if err := saveForgeHandlers(repoDir, handlers); err != nil {
+			fmt.Fprintf(os.Stderr, "forge: warning: could not update .forge-handlers: %v\n", err)
 		}
 		fmt.Printf("Added %s to .forge-formats\n", ext)
 		return nil
@@ -1529,7 +1540,6 @@ func runFormatsAdd(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// addToForgeFormats appends ext to .forge-formats if not already present.
 func addToForgeFormats(repoDir, ext string) error {
 	path := filepath.Join(repoDir, ".forge-formats")
 	existing, _ := os.ReadFile(path)
@@ -1584,7 +1594,6 @@ func runFormatsRemove(_ *cobra.Command, args []string) error {
 	return nil
 }
 
-// removeFromForgeFormats removes ext from .forge-formats, preserving comments and blank lines.
 func removeFromForgeFormats(repoDir, ext string) error {
 	path := filepath.Join(repoDir, ".forge-formats")
 	data, err := os.ReadFile(path)
@@ -1615,7 +1624,6 @@ func removeFromForgeFormats(repoDir, ext string) error {
 	return os.WriteFile(path, []byte(strings.Join(out, "\n")), 0644)
 }
 
-// removeFromGitAttributes removes the merge=forge entry for ext from .gitattributes.
 func removeFromGitAttributes(repoDir, ext string) error {
 	attrPath := filepath.Join(repoDir, ".gitattributes")
 	data, err := os.ReadFile(attrPath)
@@ -1636,7 +1644,7 @@ func removeFromGitAttributes(repoDir, ext string) error {
 func formatsUpdateCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "update [extension]",
-		Short: "Update installed handler(s) to the latest version from sources",
+		Short: "Update installed handler(s) if manifest has changed",
 		Args:  cobra.MaximumNArgs(1),
 		RunE:  runFormatsUpdate,
 	}
@@ -1673,30 +1681,40 @@ func runFormatsUpdate(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("no sources configured — run: forge source add <url>")
 	}
 
+	lockfile := loadForgeHandlers(repoDir)
+	dirty := false
+
 	for _, ext := range targetExts {
-		updated := false
 		for _, src := range sources {
-			m, err := fhr.FetchManifest(src.URL)
+			newHash, m, err := fhr.FetchManifestWithHash(src.URL)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "forge: warning: could not fetch source %q: %v\n", src.Name, err)
 				continue
 			}
-			handlerID, version, err := m.HandlerForExt(ext)
+			handlerID, build, err := m.HandlerForExt(ext)
 			if err != nil {
 				continue
 			}
-			fmt.Printf("Updating %s handler (%s v%s)...\n", ext, handlerID, version)
-			binary, err := fhr.DownloadHandler(m, handlerID, version, src.URL)
+			if lockfile[src.URL] == newHash {
+				fmt.Printf("%s: already up to date (build %s)\n", ext, build)
+				break
+			}
+			fmt.Printf("Updating %s handler (%s, build %s)...\n", ext, handlerID, build)
+			binary, err := fhr.DownloadHandler(m, handlerID, src.URL)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "forge: error updating %s: %v\n", ext, err)
 				continue
 			}
 			fmt.Printf("Updated: %s\n", binary)
-			updated = true
+			lockfile[src.URL] = newHash
+			dirty = true
 			break
 		}
-		if !updated {
-			fmt.Fprintf(os.Stderr, "forge: no handler found for %s in any source\n", ext)
+	}
+
+	if dirty {
+		if err := saveForgeHandlers(repoDir, lockfile); err != nil {
+			fmt.Fprintf(os.Stderr, "forge: warning: could not save .forge-handlers: %v\n", err)
 		}
 	}
 	return nil
@@ -1713,10 +1731,10 @@ func formatsListCmd() *cobra.Command {
 				fmt.Println("Install one with: forge formats add <extension>")
 				return nil
 			}
-			fmt.Printf("%-20s %-10s %s\n", "HANDLER", "VERSION", "FORMATS")
+			fmt.Printf("%-20s %-12s %s\n", "HANDLER", "BUILD", "FORMATS")
 			for _, h := range handlers {
 				sort.Strings(h.Formats)
-				fmt.Printf("%-20s %-10s %s\n", h.ID, h.Version, strings.Join(h.Formats, ", "))
+				fmt.Printf("%-20s %-12s %s\n", h.ID, h.Build, strings.Join(h.Formats, ", "))
 			}
 			return nil
 		},
