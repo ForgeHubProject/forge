@@ -76,8 +76,7 @@ func DownloadHandler(m *FHRManifest, handlerID, sourceURL string) (string, error
 		return "", fmt.Errorf("setting executable bit on %s: %w", binaryName, err)
 	}
 
-	_, fe, _ := m.HandlerForExt("")
-	build := fe
+	build := ""
 	for _, entry := range m.Formats {
 		if entry.Handler == handlerID {
 			build = entry.Build
@@ -144,7 +143,7 @@ func InstalledHandlerBinary(handlerID string) string {
 }
 
 // InstalledHandlerBuild returns the build SHA stored in an installed handler's
-// metadata file, or "" if the handler is not installed.
+// metadata file, or "" if not installed.
 func InstalledHandlerBuild(handlerID string) string {
 	pluginsDir, err := PluginsDir()
 	if err != nil {
