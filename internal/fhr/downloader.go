@@ -13,7 +13,7 @@ import (
 // InstalledMeta records a handler installed under ~/.forge/plugins.
 type InstalledMeta struct {
 	ID      string   `json:"id"`
-	Version string   `json:"version"`
+	Build   string   `json:"build"`
 	Source  string   `json:"source"`
 	Formats []string `json:"formats"`
 }
@@ -51,13 +51,13 @@ func PlatformKey() string {
 
 // DownloadHandler downloads a handler binary from the manifest and installs it
 // under ~/.forge/plugins. Returns the path to the installed binary.
-func DownloadHandler(m *FHRManifest, handlerID, version, sourceURL string) (string, error) {
+func DownloadHandler(m *FHRManifest, handlerID, sourceURL string) (string, error) {
 	pluginsDir, err := PluginsDir()
 	if err != nil {
 		return "", err
 	}
 
-	assetURL, err := m.HandlerAssetURL(handlerID, version, PlatformKey())
+	assetURL, err := m.HandlerAssetURL(handlerID, PlatformKey())
 	if err != nil {
 		return "", err
 	}
@@ -76,11 +76,20 @@ func DownloadHandler(m *FHRManifest, handlerID, version, sourceURL string) (stri
 		return "", fmt.Errorf("setting executable bit on %s: %w", binaryName, err)
 	}
 
+	_, fe, _ := m.HandlerForExt("")
+	build := fe
+	for _, entry := range m.Formats {
+		if entry.Handler == handlerID {
+			build = entry.Build
+			break
+		}
+	}
+
 	meta := InstalledMeta{
 		ID:      handlerID,
-		Version: version,
+		Build:   build,
 		Source:  sourceURL,
-		Formats: formatsForHandler(m, handlerID, version),
+		Formats: formatsForHandler(m, handlerID),
 	}
 	if data, err := json.MarshalIndent(meta, "", "  "); err == nil {
 		_ = os.WriteFile(binaryPath+".json", data, 0644)
@@ -134,10 +143,32 @@ func InstalledHandlerBinary(handlerID string) string {
 	return p
 }
 
-func formatsForHandler(m *FHRManifest, handlerID, version string) []string {
+// InstalledHandlerBuild returns the build SHA stored in an installed handler's
+// metadata file, or "" if the handler is not installed.
+func InstalledHandlerBuild(handlerID string) string {
+	pluginsDir, err := PluginsDir()
+	if err != nil {
+		return ""
+	}
+	name := "forge-handler-" + handlerID
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	data, err := os.ReadFile(filepath.Join(pluginsDir, name+".json"))
+	if err != nil {
+		return ""
+	}
+	var meta InstalledMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return ""
+	}
+	return meta.Build
+}
+
+func formatsForHandler(m *FHRManifest, handlerID string) []string {
 	var fmts []string
 	for ext, fe := range m.Formats {
-		if fe.Handler == handlerID && fe.Version == version {
+		if fe.Handler == handlerID {
 			fmts = append(fmts, ext)
 		}
 	}
