@@ -594,7 +594,7 @@ func reportMissingHandlers(repoDir string) {
 func repoNameFromURL(url string) string {
 	url = strings.TrimRight(url, "/")
 	url = strings.TrimSuffix(url, ".git")
-	if i := strings.LastIndexAny(url, "/:'"+`"`); i >= 0 {
+	if i := strings.LastIndexAny(url, "/:'`"+`"`); i >= 0 {
 		url = url[i+1:]
 	}
 	if url == "" {
@@ -1308,7 +1308,7 @@ func sourceCmd() *cobra.Command {
 		Use:   "source",
 		Short: "Manage FHR handler sources",
 	}
-	cmd.AddCommand(sourceAddCmd(), sourceListCmd(), sourceUpdateCmd())
+	cmd.AddCommand(sourceAddCmd(), sourceListCmd(), sourceUpdateCmd(), sourceRemoveCmd())
 	return cmd
 }
 
@@ -1415,6 +1415,24 @@ func sourceUpdateCmd() *cobra.Command {
 	}
 }
 
+func sourceRemoveCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "remove <name>",
+		Short: "Remove a handler source",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runSourceRemove,
+	}
+}
+
+func runSourceRemove(_ *cobra.Command, args []string) error {
+	name := args[0]
+	if err := fhr.RemoveSource(name); err != nil {
+		return err
+	}
+	fmt.Printf("Removed source %q\n", name)
+	return nil
+}
+
 // ── forge formats ────────────────────────────────────────────────────────────────────────────
 
 func formatsCmd() *cobra.Command {
@@ -1518,6 +1536,19 @@ func runFormatsAdd(cmd *cobra.Command, args []string) error {
 			continue
 		}
 		fmt.Printf("Found handler %q (build %s) in source %q\n", handlerID, build, src.Name)
+		if fhr.InstalledHandlerBinary(handlerID) != "" {
+			fmt.Printf("Handler %q already installed (build %s), skipping download\n", handlerID, build)
+			if err := setupGitMergeDriver(repoDir); err != nil {
+				fmt.Fprintf(os.Stderr, "forge: warning: could not update .gitattributes: %v\n", err)
+			}
+			handlers := loadForgeHandlers(repoDir)
+			handlers[src.URL] = hash
+			if err := saveForgeHandlers(repoDir, handlers); err != nil {
+				fmt.Fprintf(os.Stderr, "forge: warning: could not update .forge-handlers: %v\n", err)
+			}
+			fmt.Printf("Added %s to .forge-formats\n", ext)
+			return nil
+		}
 		binary, err := fhr.DownloadHandler(m, handlerID, src.URL)
 		if err != nil {
 			return err
