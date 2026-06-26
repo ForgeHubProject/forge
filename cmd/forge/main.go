@@ -1541,11 +1541,6 @@ func runFormatsAdd(cmd *cobra.Command, args []string) error {
 			if err := setupGitMergeDriver(repoDir); err != nil {
 				fmt.Fprintf(os.Stderr, "forge: warning: could not update .gitattributes: %v\n", err)
 			}
-			handlers := loadForgeHandlers(repoDir)
-			handlers[src.URL] = hash
-			if err := saveForgeHandlers(repoDir, handlers); err != nil {
-				fmt.Fprintf(os.Stderr, "forge: warning: could not update .forge-handlers: %v\n", err)
-			}
 			fmt.Printf("Added %s to .forge-formats\n", ext)
 			return nil
 		}
