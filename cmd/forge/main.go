@@ -2,10 +2,13 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/url"
 	"os"
@@ -24,6 +27,13 @@ import (
 	"github.com/forgehubproject/forge/internal/handler"
 	"github.com/forgehubproject/forge/internal/handler/text"
 )
+
+// HandlerLock records the installed version of a single handler for this repo.
+type HandlerLock struct {
+	Source string `json:"source"`
+	Build  string `json:"build"`
+	Hash   string `json:"hash"`
+}
 
 func main() {
 	if err := rootCmd().Execute(); err != nil {
@@ -125,26 +135,41 @@ func loadForgeFormats(repoDir string) map[string]bool {
 	return exts
 }
 
-// loadForgeHandlers reads .forge-handlers and returns sourceURL → manifest hash.
-func loadForgeHandlers(repoDir string) map[string]string {
+// loadForgeHandlers reads .forge-handlers and returns handlerID → HandlerLock.
+// Old-format files (sourceURL → string) silently return an empty map.
+func loadForgeHandlers(repoDir string) map[string]HandlerLock {
 	data, err := os.ReadFile(filepath.Join(repoDir, ".forge-handlers"))
 	if err != nil {
-		return map[string]string{}
+		return map[string]HandlerLock{}
 	}
-	var m map[string]string
+	var m map[string]HandlerLock
 	if err := json.Unmarshal(data, &m); err != nil {
-		return map[string]string{}
+		return map[string]HandlerLock{}
 	}
 	return m
 }
 
 // saveForgeHandlers writes the .forge-handlers lockfile.
-func saveForgeHandlers(repoDir string, m map[string]string) error {
+func saveForgeHandlers(repoDir string, m map[string]HandlerLock) error {
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(filepath.Join(repoDir, ".forge-handlers"), append(data, '\n'), 0644)
+}
+
+// computeFileSHA256 returns "sha256:<hex>" for the file at path.
+func computeFileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // ── forge init ─────────────────────────────────────────────────────────────────────────────────
@@ -1526,7 +1551,7 @@ func runFormatsAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	for _, src := range sources {
-		hash, m, err := fhr.FetchManifestWithHash(src.URL)
+		m, err := fhr.FetchManifest(src.URL)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "forge: warning: could not fetch source %q: %v\n", src.Name, err)
 			continue
@@ -1541,6 +1566,10 @@ func runFormatsAdd(cmd *cobra.Command, args []string) error {
 			if err := setupGitMergeDriver(repoDir); err != nil {
 				fmt.Fprintf(os.Stderr, "forge: warning: could not update .gitattributes: %v\n", err)
 			}
+			handlers := loadForgeHandlers(repoDir)
+			if lock, ok := handlers[handlerID]; ok && lock.Build != build {
+				fmt.Printf("note: newer handler build available (%s → %s). Run: forge formats update %s\n", lock.Build, build, ext)
+			}
 			fmt.Printf("Added %s to .forge-formats\n", ext)
 			return nil
 		}
@@ -1549,11 +1578,12 @@ func runFormatsAdd(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		fmt.Printf("Installed: %s\n", binary)
+		binaryHash, _ := computeFileSHA256(binary)
 		if err := setupGitMergeDriver(repoDir); err != nil {
 			fmt.Fprintf(os.Stderr, "forge: warning: could not update .gitattributes: %v\n", err)
 		}
 		handlers := loadForgeHandlers(repoDir)
-		handlers[src.URL] = hash
+		handlers[handlerID] = HandlerLock{Source: src.URL, Build: build, Hash: binaryHash}
 		if err := saveForgeHandlers(repoDir, handlers); err != nil {
 			fmt.Fprintf(os.Stderr, "forge: warning: could not update .forge-handlers: %v\n", err)
 		}
@@ -1712,7 +1742,7 @@ func runFormatsUpdate(_ *cobra.Command, args []string) error {
 
 	for _, ext := range targetExts {
 		for _, src := range sources {
-			newHash, m, err := fhr.FetchManifestWithHash(src.URL)
+			m, err := fhr.FetchManifest(src.URL)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "forge: warning: could not fetch source %q: %v\n", src.Name, err)
 				continue
@@ -1721,7 +1751,7 @@ func runFormatsUpdate(_ *cobra.Command, args []string) error {
 			if err != nil {
 				continue
 			}
-			if lockfile[src.URL] == newHash {
+			if lock, ok := lockfile[handlerID]; ok && lock.Build == build {
 				fmt.Printf("%s: already up to date (build %s)\n", ext, build)
 				break
 			}
@@ -1732,7 +1762,8 @@ func runFormatsUpdate(_ *cobra.Command, args []string) error {
 				continue
 			}
 			fmt.Printf("Updated: %s\n", binary)
-			lockfile[src.URL] = newHash
+			binaryHash, _ := computeFileSHA256(binary)
+			lockfile[handlerID] = HandlerLock{Source: src.URL, Build: build, Hash: binaryHash}
 			dirty = true
 			break
 		}
