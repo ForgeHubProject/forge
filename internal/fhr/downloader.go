@@ -1,6 +1,8 @@
 package fhr
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +17,7 @@ type InstalledMeta struct {
 	ID      string   `json:"id"`
 	Build   string   `json:"build"`
 	Source  string   `json:"source"`
+	Hash    string   `json:"hash"`
 	Formats []string `json:"formats"`
 }
 
@@ -69,7 +72,8 @@ func DownloadHandler(m *FHRManifest, handlerID, sourceURL string) (string, error
 	binaryPath := filepath.Join(pluginsDir, binaryName)
 
 	fmt.Printf("Downloading %s...\n", binaryName)
-	if err := downloadFile(assetURL, binaryPath); err != nil {
+	binaryHash, err := downloadFile(assetURL, binaryPath)
+	if err != nil {
 		return "", fmt.Errorf("downloading %s: %w", binaryName, err)
 	}
 	if err := os.Chmod(binaryPath, 0755); err != nil {
@@ -88,6 +92,7 @@ func DownloadHandler(m *FHRManifest, handlerID, sourceURL string) (string, error
 		ID:      handlerID,
 		Build:   build,
 		Source:  sourceURL,
+		Hash:    binaryHash,
 		Formats: formatsForHandler(m, handlerID),
 	}
 	if data, err := json.MarshalIndent(meta, "", "  "); err == nil {
@@ -174,20 +179,23 @@ func formatsForHandler(m *FHRManifest, handlerID string) []string {
 	return fmts
 }
 
-func downloadFile(url, dest string) error {
+func downloadFile(url, dest string) (string, error) {
 	resp, err := http.Get(url) //nolint:noctx
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d from %s", resp.StatusCode, url)
+		return "", fmt.Errorf("HTTP %d from %s", resp.StatusCode, url)
 	}
 	f, err := os.Create(dest)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer f.Close()
-	_, err = io.Copy(f, resp.Body)
-	return err
+	h := sha256.New()
+	if _, err = io.Copy(f, io.TeeReader(resp.Body, h)); err != nil {
+		return "", err
+	}
+	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
 }
