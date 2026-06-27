@@ -2,13 +2,10 @@ package main
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"net/url"
 	"os"
@@ -27,13 +24,6 @@ import (
 	"github.com/forgehubproject/forge/internal/handler"
 	"github.com/forgehubproject/forge/internal/handler/text"
 )
-
-// HandlerLock records the installed version of a single handler for this repo.
-type HandlerLock struct {
-	Source string `json:"source"`
-	Build  string `json:"build"`
-	Hash   string `json:"hash"`
-}
 
 func main() {
 	if err := rootCmd().Execute(); err != nil {
@@ -135,22 +125,21 @@ func loadForgeFormats(repoDir string) map[string]bool {
 	return exts
 }
 
-// loadForgeHandlers reads .forge-handlers and returns handlerID → HandlerLock.
-// Old-format files (sourceURL → string) silently return an empty map.
-func loadForgeHandlers(repoDir string) map[string]HandlerLock {
+// loadForgeHandlers reads .forge-handlers and returns handlerID → pinned build (nil = unpinned).
+func loadForgeHandlers(repoDir string) map[string]*string {
 	data, err := os.ReadFile(filepath.Join(repoDir, ".forge-handlers"))
 	if err != nil {
-		return map[string]HandlerLock{}
+		return map[string]*string{}
 	}
-	var m map[string]HandlerLock
+	var m map[string]*string
 	if err := json.Unmarshal(data, &m); err != nil {
-		return map[string]HandlerLock{}
+		return map[string]*string{}
 	}
 	return m
 }
 
 // saveForgeHandlers writes the .forge-handlers lockfile.
-func saveForgeHandlers(repoDir string, m map[string]HandlerLock) error {
+func saveForgeHandlers(repoDir string, m map[string]*string) error {
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return err
@@ -158,21 +147,7 @@ func saveForgeHandlers(repoDir string, m map[string]HandlerLock) error {
 	return os.WriteFile(filepath.Join(repoDir, ".forge-handlers"), append(data, '\n'), 0644)
 }
 
-// computeFileSHA256 returns "sha256:<hex>" for the file at path.
-func computeFileSHA256(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
-}
-
-// ── forge init ─────────────────────────────────────────────────────────────────────────────────
+// ── forge init ──────────────────────────────────────────────────────────────────────────────────────
 
 func initCmd() *cobra.Command {
 	return &cobra.Command{
@@ -243,7 +218,7 @@ func setupGitMergeDriver(repoDir string) error {
 	return nil
 }
 
-// ── forge status ─────────────────────────────────────────────────────────────────────────
+// ── forge status ────────────────────────────────────────────────────────────────────────────────────
 
 func statusCmd() *cobra.Command {
 	return &cobra.Command{
@@ -476,7 +451,7 @@ func printMergeStatus() {
 	fmt.Println()
 }
 
-// ── forge clone ───────────────────────────────────────────────────────────────────────────
+// ── forge clone ───────────────────────────────────────────────────────────────────────────────────
 
 func cloneCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -628,7 +603,7 @@ func repoNameFromURL(url string) string {
 	return url
 }
 
-// ── forge diff ───────────────────────────────────────────────────────────────────────────
+// ── forge diff ───────────────────────────────────────────────────────────────────────────────────
 
 func diffCmd() *cobra.Command {
 	return &cobra.Command{
@@ -772,7 +747,7 @@ func renderChanges(changes []handler.DiffChange, connPrefix, contPrefix string) 
 	}
 }
 
-// ── forge mergetool ────────────────────────────────────────────────────────────────────────────
+// ── forge mergetool ──────────────────────────────────────────────────────────────────────────────────
 
 func mergeToolCmd() *cobra.Command {
 	return &cobra.Command{
@@ -1212,7 +1187,7 @@ func extractConflictVersions(path string) (localFile, remoteFile string, err err
 	return lf.Name(), rf.Name(), nil
 }
 
-// ── forge merge ────────────────────────────────────────────────────────────────────────────
+// ── forge merge ────────────────────────────────────────────────────────────────────────────────────
 
 func mergeCmd() *cobra.Command {
 	return &cobra.Command{
@@ -1251,7 +1226,7 @@ func runMerge(_ *cobra.Command, args []string) error {
 	return nil
 }
 
-// ── forge merge-file ─────────────────────────────────────────────────────────────────────────────
+// ── forge merge-file ──────────────────────────────────────────────────────────────────────────────────────
 
 func mergeFileCmd() *cobra.Command {
 	return &cobra.Command{
@@ -1326,7 +1301,7 @@ func runMergeFile(_ *cobra.Command, args []string) error {
 	return nil
 }
 
-// ── forge source ───────────────────────────────────────────────────────────────────────────
+// ── forge source ────────────────────────────────────────────────────────────────────────────────────
 
 func sourceCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -1458,7 +1433,7 @@ func runSourceRemove(_ *cobra.Command, args []string) error {
 	return nil
 }
 
-// ── forge formats ────────────────────────────────────────────────────────────────────────────
+// ── forge formats ────────────────────────────────────────────────────────────────────────────────────
 
 func formatsCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -1562,13 +1537,20 @@ func runFormatsAdd(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Printf("Found handler %q (build %s) in source %q\n", handlerID, build, src.Name)
 		if fhr.InstalledHandlerBinary(handlerID) != "" {
-			fmt.Printf("Handler %q already installed (build %s), skipping download\n", handlerID, build)
+			fmt.Printf("Handler %q already installed, skipping download\n", handlerID)
 			if err := setupGitMergeDriver(repoDir); err != nil {
 				fmt.Fprintf(os.Stderr, "forge: warning: could not update .gitattributes: %v\n", err)
 			}
+			installedBuild := fhr.InstalledHandlerBuild(handlerID)
 			handlers := loadForgeHandlers(repoDir)
-			if lock, ok := handlers[handlerID]; ok && lock.Build != build {
-				fmt.Printf("note: newer handler build available (%s → %s). Run: forge formats update %s\n", lock.Build, build, ext)
+			if _, pinned := handlers[handlerID]; !pinned && installedBuild != "" {
+				handlers[handlerID] = &installedBuild
+				if err := saveForgeHandlers(repoDir, handlers); err != nil {
+					fmt.Fprintf(os.Stderr, "forge: warning: could not update .forge-handlers: %v\n", err)
+				}
+			}
+			if installedBuild != "" && installedBuild != build {
+				fmt.Printf("note: newer handler build available (%s → %s). Run: forge formats update %s\n", installedBuild, build, ext)
 			}
 			fmt.Printf("Added %s to .forge-formats\n", ext)
 			return nil
@@ -1578,12 +1560,12 @@ func runFormatsAdd(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		fmt.Printf("Installed: %s\n", binary)
-		binaryHash, _ := computeFileSHA256(binary)
 		if err := setupGitMergeDriver(repoDir); err != nil {
 			fmt.Fprintf(os.Stderr, "forge: warning: could not update .gitattributes: %v\n", err)
 		}
 		handlers := loadForgeHandlers(repoDir)
-		handlers[handlerID] = HandlerLock{Source: src.URL, Build: build, Hash: binaryHash}
+		b := build
+		handlers[handlerID] = &b
 		if err := saveForgeHandlers(repoDir, handlers); err != nil {
 			fmt.Fprintf(os.Stderr, "forge: warning: could not update .forge-handlers: %v\n", err)
 		}
@@ -1700,7 +1682,7 @@ func removeFromGitAttributes(repoDir, ext string) error {
 func formatsUpdateCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "update [extension]",
-		Short: "Update installed handler(s) if manifest has changed",
+		Short: "Update installed handler(s) if a newer build is available",
 		Args:  cobra.MaximumNArgs(1),
 		RunE:  runFormatsUpdate,
 	}
@@ -1751,8 +1733,18 @@ func runFormatsUpdate(_ *cobra.Command, args []string) error {
 			if err != nil {
 				continue
 			}
-			if lock, ok := lockfile[handlerID]; ok && lock.Build == build {
+			pin := lockfile[handlerID]
+			if pin != nil && *pin == build {
 				fmt.Printf("%s: already up to date (build %s)\n", ext, build)
+				break
+			}
+			if fhr.InstalledHandlerBinary(handlerID) != "" && fhr.InstalledHandlerBuild(handlerID) == build {
+				fmt.Printf("%s: already up to date (build %s)\n", ext, build)
+				if pin == nil {
+					b := build
+					lockfile[handlerID] = &b
+					dirty = true
+				}
 				break
 			}
 			fmt.Printf("Updating %s handler (%s, build %s)...\n", ext, handlerID, build)
@@ -1762,8 +1754,8 @@ func runFormatsUpdate(_ *cobra.Command, args []string) error {
 				continue
 			}
 			fmt.Printf("Updated: %s\n", binary)
-			binaryHash, _ := computeFileSHA256(binary)
-			lockfile[handlerID] = HandlerLock{Source: src.URL, Build: build, Hash: binaryHash}
+			b := build
+			lockfile[handlerID] = &b
 			dirty = true
 			break
 		}
@@ -1798,7 +1790,7 @@ func formatsListCmd() *cobra.Command {
 	}
 }
 
-// ── git pass-throughs ────────────────────────────────────────────────────────────────────────────
+// ── git pass-throughs ────────────────────────────────────────────────────────────────────────────────────
 
 func gitPassthrough(name, short string) *cobra.Command {
 	return &cobra.Command{
