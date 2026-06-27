@@ -93,3 +93,37 @@ func AddSource(name, rawURL string) error {
 	_, err = fmt.Fprintf(f, "%s\t%s\n", name, rawURL)
 	return err
 }
+
+// RemoveSource removes the named entry from ~/.forge/sources.list.
+func RemoveSource(name string) error {
+	path, err := sourcesPath()
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return fmt.Errorf("source %q not found", name)
+	}
+	if err != nil {
+		return err
+	}
+	var out []string
+	found := false
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			out = append(out, line)
+			continue
+		}
+		parts := strings.Fields(trimmed)
+		if len(parts) >= 1 && parts[0] == name {
+			found = true
+			continue
+		}
+		out = append(out, line)
+	}
+	if !found {
+		return fmt.Errorf("source %q not found", name)
+	}
+	return os.WriteFile(path, []byte(strings.Join(out, "\n")), 0644)
+}
