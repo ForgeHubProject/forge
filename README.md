@@ -310,6 +310,20 @@ A minimal handler in any language needs fewer than 100 lines: parse the subcomma
 
 ---
 
+## Authentication
+
+`forge login <url>` authenticates against a ForgeHub server, mints a Personal Access Token via `POST /auth/tokens`, and stores it using git's own credential-helper protocol (`git credential approve`) — whatever helper is already configured on the machine (osxkeychain, wincred, libsecret, `cache`, `store`, ...). Once stored, both plain `git` and `forge` pick the credential up automatically for that host; there's no separate credential store to manage.
+
+For HTTPS operations, `forge clone` resolves credentials in this order:
+
+1. `--token <token>` flag
+2. `FORGE_TOKEN`, `GH_TOKEN`, or `GITHUB_TOKEN` environment variables
+3. `git credential fill` — anything already stored (via `forge login`, `git credential approve`, or an OS credential manager)
+
+If none of these produce a credential and the repository requires auth, the clone fails with the server's 401 rather than a generic "not found".
+
+**HTTPS is required for credential-manager support.** Git credential helpers key their lookups on `protocol` + `host`; browser- and OS-level credential managers generally won't offer to fill or prompt for a plain `http://` remote the way they do for `https://` (this is a property of the credential helpers themselves, not something Forge or ForgeHub control). Self-hosted ForgeHub instances should run behind TLS in any environment where this matters — plain-HTTP setups will work, but `git credential fill` may come back empty even when a credential was stored, since some helpers refuse to match on `http`.
+
 ## Relationship to ForgeHub
 
 ForgeHub is the web hosting platform for Forge repos. The handler abstraction appears in both layers:
