@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -19,6 +22,8 @@ import (
 	gogithttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	gogitssh "github.com/go-git/go-git/v5/plumbing/transport/ssh"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
+	"github.com/forgehubproject/forge/internal/credential"
 	"github.com/forgehubproject/forge/internal/fhr"
 	"github.com/forgehubproject/forge/internal/gitrepo"
 	"github.com/forgehubproject/forge/internal/handler"
@@ -39,6 +44,7 @@ func rootCmd() *cobra.Command {
 	}
 	root.AddCommand(
 		initCmd(),
+		loginCmd(),
 		cloneCmd(),
 		statusCmd(),
 		diffCmd(),
@@ -532,9 +538,166 @@ func buildCloneOptions(rawURL, token, sshKeyPath, sshPassword string) (*gogit.Cl
 	}
 	if token != "" {
 		opts.Auth = &gogithttp.BasicAuth{Username: "x-token", Password: token}
+		return opts, nil
+	}
+
+	// Fall back to whatever git credential helper is already configured on
+	// this machine (osxkeychain, wincred, libsecret, cache, store, ...) —
+	// e.g. the credential `forge login` stores — before giving up.
+	if username, password, ok := credential.Fill(rawURL); ok {
+		opts.Auth = &gogithttp.BasicAuth{Username: username, Password: password}
 	}
 
 	return opts, nil
+}
+
+// ── forge login ───────────────────────────────────────────────────────────────────────────────────
+
+func loginCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "login <url>",
+		Short: "Authenticate against a ForgeHub server and store the credential for git/forge to reuse",
+		Long: "Logs in to a ForgeHub server, mints a Personal Access Token, and stores it via git's\n" +
+			"own credential-helper protocol — so plain `git` and `forge` both pick it up automatically\n" +
+			"afterward, with no need to pass --token or paste it into environment variables.",
+		Args: cobra.ExactArgs(1),
+		RunE: runLogin,
+	}
+	cmd.Flags().String("email", "", "Account email (prompted if omitted)")
+	cmd.Flags().String("password", "", "Account password (prompted if omitted; avoid passing on shared machines)")
+	return cmd
+}
+
+func runLogin(cmd *cobra.Command, args []string) error {
+	baseURL := strings.TrimRight(args[0], "/")
+	if baseURL == "" {
+		return errors.New("url is required")
+	}
+
+	email, _ := cmd.Flags().GetString("email")
+	password, _ := cmd.Flags().GetString("password")
+
+	if email == "" {
+		fmt.Print("Email: ")
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("reading email: %w", err)
+		}
+		email = strings.TrimSpace(line)
+	}
+	if email == "" {
+		return errors.New("email is required")
+	}
+
+	if password == "" {
+		fmt.Print("Password: ")
+		pw, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Println()
+		if err != nil {
+			return fmt.Errorf("reading password: %w", err)
+		}
+		password = string(pw)
+	}
+	if password == "" {
+		return errors.New("password is required")
+	}
+
+	sessionToken, err := forgeHubLogin(baseURL, email, password)
+	if err != nil {
+		return fmt.Errorf("login failed: %w", err)
+	}
+
+	hostname, _ := os.Hostname()
+	tokenName := "forge-cli@" + hostname
+	pat, err := forgeHubCreateToken(baseURL, sessionToken, tokenName)
+	if err != nil {
+		return fmt.Errorf("logged in, but could not create a personal access token: %w", err)
+	}
+
+	if err := credential.Approve(baseURL, email, pat); err != nil {
+		fmt.Fprintf(os.Stderr, "forge: warning: could not store credential via git credential helper: %v\n", err)
+		fmt.Printf("Your token (save it yourself, it will not be shown again): %s\n", pat)
+		return nil
+	}
+
+	fmt.Printf("Logged in as %s.\n", email)
+	fmt.Printf("Credential stored via git's credential helper — git and forge will use it automatically for %s.\n", baseURL)
+	return nil
+}
+
+func forgeHubLogin(baseURL, email, password string) (string, error) {
+	body, err := json.Marshal(map[string]string{"email": email, "password": password})
+	if err != nil {
+		return "", err
+	}
+	resp, err := http.Post(baseURL+"/auth/login", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", errors.New(forgeHubErrorMessage(data, resp.StatusCode))
+	}
+	var out struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return "", fmt.Errorf("decoding response: %w", err)
+	}
+	if out.Token == "" {
+		return "", errors.New("server did not return a session token")
+	}
+	return out.Token, nil
+}
+
+func forgeHubCreateToken(baseURL, sessionToken, name string) (string, error) {
+	body, err := json.Marshal(map[string]string{"name": name})
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/auth/tokens", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusCreated {
+		return "", errors.New(forgeHubErrorMessage(data, resp.StatusCode))
+	}
+	var out struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return "", fmt.Errorf("decoding response: %w", err)
+	}
+	if out.Token == "" {
+		return "", errors.New("server did not return a token")
+	}
+	return out.Token, nil
+}
+
+func forgeHubErrorMessage(body []byte, status int) string {
+	var out struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(body, &out) == nil && out.Error != "" {
+		return out.Error
+	}
+	return fmt.Sprintf("unexpected status %d", status)
 }
 
 func isSSHURL(rawURL string) bool {
