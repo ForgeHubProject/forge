@@ -11,11 +11,12 @@ OS="$(uname -s)"
 ARCH="$(uname -m)"
 
 case "$OS" in
-  Linux)  GOOS="linux" ;;
-  Darwin) GOOS="darwin" ;;
+  Linux)             GOOS="linux" ;;
+  Darwin)            GOOS="darwin" ;;
+  MINGW*|MSYS*|CYGWIN*) GOOS="windows" ;;
   *)
     echo "error: unsupported OS: $OS" >&2
-    echo "       forge install supports Linux and macOS." >&2
+    echo "       forge install supports Linux, macOS, and Windows (via Git Bash/MSYS/WSL)." >&2
     exit 1
     ;;
 esac
@@ -43,6 +44,19 @@ if [ "$GOOS" = "darwin" ]; then
   fi
 fi
 
+# ── Windows (Git Bash/MSYS) install path ─────────────────────────────────────
+
+if [ "$GOOS" = "windows" ]; then
+  BINARY_NAME="forge.exe"
+  # No sudo on Windows; install to a user-writable dir instead of /usr/bin.
+  INSTALL_DIR="$HOME/bin"
+  mkdir -p "$INSTALL_DIR"
+  case ":$PATH:" in
+    *":$INSTALL_DIR:"*) ;;
+    *) echo "note: add $INSTALL_DIR to PATH to use 'forge' from any shell." ;;
+  esac
+fi
+
 # ── prerequisites ─────────────────────────────────────────────────────────────
 
 if ! command -v go &>/dev/null; then
@@ -55,7 +69,7 @@ GO_VERSION="$(go version | awk '{print $3}' | sed 's/go//')"
 echo "Go:      $GO_VERSION"
 
 # Verify we're in the forge repo root
-if [ ! -f "go.mod" ] || ! grep -q 'yakupatahanov/forge' go.mod 2>/dev/null; then
+if [ ! -f "go.mod" ] || ! grep -q '^module github.com/forgehubproject/forge$' go.mod 2>/dev/null; then
   echo "error: run this script from the forge repository root." >&2
   exit 1
 fi
