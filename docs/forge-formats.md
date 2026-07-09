@@ -1,5 +1,13 @@
 # `.forge-formats` — Per-Repo Format Manifest
 
+> **Location update (issue #22):** per-repo forge files now live in a `.forge/`
+> directory at the repo root — the format list at `.forge/formats` and the
+> handler lockfile at `.forge/handlers`. Legacy root-level `.forge-formats` /
+> `.forge-handlers` files are still read, and are migrated into `.forge/`
+> automatically the next time forge writes to them. Note the implemented file
+> format is a plain line-based extension list (one per line, `#` comments), not
+> the TOML sketched below — this document predates the implementation.
+
 This document specifies the `.forge-formats` file, the `forge source` and
 `forge formats` CLI commands, and how they integrate with the broader FHR
 (Forge-Handler-Repository) ecosystem.
