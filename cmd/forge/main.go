@@ -28,6 +28,7 @@ import (
 	"github.com/forgehubproject/forge/internal/gitrepo"
 	"github.com/forgehubproject/forge/internal/handler"
 	"github.com/forgehubproject/forge/internal/handler/text"
+	"github.com/forgehubproject/forge/internal/webdiff"
 )
 
 func main() {
@@ -819,12 +820,15 @@ func repoNameFromURL(url string) string {
 // ── forge diff ───────────────────────────────────────────────────────────────────────────────────
 
 func diffCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "diff [file]",
 		Short: "Show semantic diff between working tree and HEAD",
 		Args:  cobra.MaximumNArgs(1),
 		RunE:  runDiff,
 	}
+	cmd.Flags().Bool("web", false, "Render the diff in a local browser using the format's FHR renderer")
+	cmd.Flags().Bool("no-open", false, "With --web, print the URL but do not launch a browser")
+	return cmd
 }
 
 func runDiff(cmd *cobra.Command, args []string) error {
@@ -839,6 +843,14 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	}
 
 	reg := defaultRegistry()
+
+	if web, _ := cmd.Flags().GetBool("web"); web {
+		if len(args) != 1 {
+			return fmt.Errorf("forge diff --web needs exactly one file to render")
+		}
+		noOpen, _ := cmd.Flags().GetBool("no-open")
+		return diffFileWeb(repo, reg, cleanPath(args[0]), !noOpen)
+	}
 
 	if len(args) == 1 {
 		return diffFile(repo, reg, cleanPath(args[0]))
@@ -897,6 +909,92 @@ func diffFile(repo *gitrepo.Repo, reg *handler.Registry, path string) error {
 
 	renderDiff(path, diff)
 	return nil
+}
+
+// diffFileWeb computes the semantic diff locally and serves it to a loopback
+// browser page rendered by the format's FHR renderer bundle (SPEC-RENDERING §3b).
+func diffFileWeb(repo *gitrepo.Repo, reg *handler.Registry, path string, openBrowser bool) error {
+	path = cleanPath(path)
+	h, err := reg.Resolve(path)
+	if err != nil {
+		return err
+	}
+	namer, ok := h.(handler.Namer)
+	if !ok || namer.Format() == "text" {
+		return fmt.Errorf("--web needs a semantic handler; %s has none — use plain: forge diff %s", path, path)
+	}
+	handlerID := namer.Format()
+
+	base, err := repo.BlobAtHEAD(filepath.ToSlash(path))
+	if err != nil {
+		return fmt.Errorf("reading HEAD blob for %s: %w", path, err)
+	}
+	head, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("reading working tree file %s: %w", path, err)
+	}
+
+	diff, err := h.Diff(base, head)
+	if err != nil {
+		return fmt.Errorf("diff %s: %w", path, err)
+	}
+	diffJSON, err := json.Marshal(diff)
+	if err != nil {
+		return fmt.Errorf("encoding diff: %w", err)
+	}
+
+	rendererPath, err := ensureRenderer(handlerID)
+	if err != nil {
+		return err
+	}
+
+	return webdiff.Serve(webdiff.Payload{
+		FilePath:   path,
+		HandlerID:  handlerID,
+		Mode:       "diff",
+		DiffJSON:   diffJSON,
+		RendererJS: rendererPath,
+		Base:       base,
+		Head:       head,
+	}, openBrowser)
+}
+
+// ensureRenderer returns the path to the installed renderer bundle for a
+// handler, downloading it from a configured source if not already present.
+func ensureRenderer(handlerID string) (string, error) {
+	if p := fhr.InstalledRenderer(handlerID); p != "" {
+		return p, nil
+	}
+	sources, err := fhr.LoadSources()
+	if err != nil {
+		return "", err
+	}
+	if len(sources) == 0 {
+		return "", fmt.Errorf("no renderer installed for %q and no sources configured — run: forge source add <url>", handlerID)
+	}
+	for _, src := range sources {
+		m, err := fhr.FetchManifest(src.URL)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "forge: warning: could not fetch source %q: %v\n", src.Name, err)
+			continue
+		}
+		if _, err := m.RendererAssetURL(handlerID); err != nil {
+			continue
+		}
+		return fhr.DownloadRenderer(m, handlerID, src.URL)
+	}
+	return "", fmt.Errorf("no renderer for %q found in any configured source", handlerID)
+}
+
+// maybeInstallRenderer downloads a handler's renderer bundle if the source
+// advertises one. Best effort — a missing renderer only disables `forge diff --web`.
+func maybeInstallRenderer(m *fhr.FHRManifest, handlerID, sourceURL string) {
+	if _, err := m.RendererAssetURL(handlerID); err != nil {
+		return
+	}
+	if _, err := fhr.DownloadRenderer(m, handlerID, sourceURL); err != nil {
+		fmt.Fprintf(os.Stderr, "forge: warning: handler installed but renderer download failed: %v\n", err)
+	}
 }
 
 func renderDiff(path string, diff handler.StructuredDiff) {
@@ -1765,6 +1863,9 @@ func runFormatsAdd(cmd *cobra.Command, args []string) error {
 			if installedBuild != "" && installedBuild != build {
 				fmt.Printf("note: newer handler build available (%s → %s). Run: forge formats update %s\n", installedBuild, build, ext)
 			}
+			if fhr.InstalledRenderer(handlerID) == "" {
+				maybeInstallRenderer(m, handlerID, src.URL)
+			}
 			fmt.Printf("Added %s to .forge/formats\n", ext)
 			return nil
 		}
@@ -1773,6 +1874,7 @@ func runFormatsAdd(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		fmt.Printf("Installed: %s\n", binary)
+		maybeInstallRenderer(m, handlerID, src.URL)
 		if err := setupGitMergeDriver(repoDir); err != nil {
 			fmt.Fprintf(os.Stderr, "forge: warning: could not update .gitattributes: %v\n", err)
 		}
@@ -1973,6 +2075,7 @@ func runFormatsUpdate(_ *cobra.Command, args []string) error {
 				continue
 			}
 			fmt.Printf("Updated: %s\n", binary)
+			maybeInstallRenderer(m, handlerID, src.URL)
 			b := build
 			lockfile[handlerID] = &b
 			dirty = true
