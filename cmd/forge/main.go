@@ -112,8 +112,53 @@ func findRepoRoot() string {
 	return strings.TrimSpace(string(out))
 }
 
+// Per-repo forge files live in .forge/ ("formats" and the "handlers" lockfile).
+// The legacy root-level names (.forge-formats, .forge-handlers) are still read
+// when .forge/ has no copy; any write migrates the legacy file first.
+const forgeRepoDir = ".forge"
+
+var legacyFileWarned = map[string]bool{}
+
+// perRepoFilePath resolves a per-repo forge file for reading: the .forge/
+// location wins, otherwise a legacy root-level file is used if present.
+func perRepoFilePath(repoDir, name, legacyName string) string {
+	current := filepath.Join(repoDir, forgeRepoDir, name)
+	if _, err := os.Stat(current); err == nil {
+		return current
+	}
+	legacy := filepath.Join(repoDir, legacyName)
+	if _, err := os.Stat(legacy); err == nil {
+		if !legacyFileWarned[legacyName] {
+			legacyFileWarned[legacyName] = true
+			fmt.Fprintf(os.Stderr, "forge: note: %s now lives at %s/%s; it will be moved automatically on the next forge write\n", legacyName, forgeRepoDir, name)
+		}
+		return legacy
+	}
+	return current
+}
+
+// migratePerRepoFile prepares a per-repo forge file for writing: ensures
+// .forge/ exists and moves a legacy root-level file into it if one is present.
+func migratePerRepoFile(repoDir, name, legacyName string) (string, error) {
+	if err := os.MkdirAll(filepath.Join(repoDir, forgeRepoDir), 0755); err != nil {
+		return "", err
+	}
+	current := filepath.Join(repoDir, forgeRepoDir, name)
+	if _, err := os.Stat(current); err == nil {
+		return current, nil
+	}
+	legacy := filepath.Join(repoDir, legacyName)
+	if _, err := os.Stat(legacy); err == nil {
+		if err := os.Rename(legacy, current); err != nil {
+			return "", fmt.Errorf("migrating %s to %s/%s: %w", legacyName, forgeRepoDir, name, err)
+		}
+		fmt.Fprintf(os.Stderr, "forge: migrated %s → %s/%s — remember to commit this move\n", legacyName, forgeRepoDir, name)
+	}
+	return current, nil
+}
+
 func loadForgeFormats(repoDir string) map[string]bool {
-	data, err := os.ReadFile(filepath.Join(repoDir, ".forge-formats"))
+	data, err := os.ReadFile(perRepoFilePath(repoDir, "formats", ".forge-formats"))
 	if err != nil {
 		return nil
 	}
@@ -131,9 +176,10 @@ func loadForgeFormats(repoDir string) map[string]bool {
 	return exts
 }
 
-// loadForgeHandlers reads .forge-handlers and returns handlerID → pinned build (nil = unpinned).
+// loadForgeHandlers reads the .forge/handlers lockfile and returns
+// handlerID → pinned build (nil = unpinned).
 func loadForgeHandlers(repoDir string) map[string]*string {
-	data, err := os.ReadFile(filepath.Join(repoDir, ".forge-handlers"))
+	data, err := os.ReadFile(perRepoFilePath(repoDir, "handlers", ".forge-handlers"))
 	if err != nil {
 		return map[string]*string{}
 	}
@@ -144,13 +190,17 @@ func loadForgeHandlers(repoDir string) map[string]*string {
 	return m
 }
 
-// saveForgeHandlers writes the .forge-handlers lockfile.
+// saveForgeHandlers writes the .forge/handlers lockfile.
 func saveForgeHandlers(repoDir string, m map[string]*string) error {
+	path, err := migratePerRepoFile(repoDir, "handlers", ".forge-handlers")
+	if err != nil {
+		return err
+	}
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(repoDir, ".forge-handlers"), append(data, '\n'), 0644)
+	return os.WriteFile(path, append(data, '\n'), 0644)
 }
 
 // ── forge init ──────────────────────────────────────────────────────────────────────────────────────
@@ -1662,7 +1712,7 @@ func runFormatsAdd(cmd *cobra.Command, args []string) error {
 
 	repoDir := findRepoRoot()
 	if err := addToForgeFormats(repoDir, ext); err != nil {
-		return fmt.Errorf("updating .forge-formats: %w", err)
+		return fmt.Errorf("updating .forge/formats: %w", err)
 	}
 
 	sources, err := fhr.LoadSources()
@@ -1670,7 +1720,7 @@ func runFormatsAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if len(sources) == 0 {
-		fmt.Printf("Added %s to .forge-formats\n", ext)
+		fmt.Printf("Added %s to .forge/formats\n", ext)
 		fmt.Println("No handler sources configured — run: forge source add <url>")
 		return nil
 	}
@@ -1709,13 +1759,13 @@ func runFormatsAdd(cmd *cobra.Command, args []string) error {
 			if _, pinned := handlers[handlerID]; !pinned && installedBuild != "" {
 				handlers[handlerID] = &installedBuild
 				if err := saveForgeHandlers(repoDir, handlers); err != nil {
-					fmt.Fprintf(os.Stderr, "forge: warning: could not update .forge-handlers: %v\n", err)
+					fmt.Fprintf(os.Stderr, "forge: warning: could not update .forge/handlers: %v\n", err)
 				}
 			}
 			if installedBuild != "" && installedBuild != build {
 				fmt.Printf("note: newer handler build available (%s → %s). Run: forge formats update %s\n", installedBuild, build, ext)
 			}
-			fmt.Printf("Added %s to .forge-formats\n", ext)
+			fmt.Printf("Added %s to .forge/formats\n", ext)
 			return nil
 		}
 		binary, err := fhr.DownloadHandler(m, handlerID, src.URL)
@@ -1730,19 +1780,22 @@ func runFormatsAdd(cmd *cobra.Command, args []string) error {
 		b := build
 		handlers[handlerID] = &b
 		if err := saveForgeHandlers(repoDir, handlers); err != nil {
-			fmt.Fprintf(os.Stderr, "forge: warning: could not update .forge-handlers: %v\n", err)
+			fmt.Fprintf(os.Stderr, "forge: warning: could not update .forge/handlers: %v\n", err)
 		}
-		fmt.Printf("Added %s to .forge-formats\n", ext)
+		fmt.Printf("Added %s to .forge/formats\n", ext)
 		return nil
 	}
 
-	fmt.Printf("Added %s to .forge-formats\n", ext)
+	fmt.Printf("Added %s to .forge/formats\n", ext)
 	fmt.Printf("No handler found for %s in any configured source.\n", ext)
 	return nil
 }
 
 func addToForgeFormats(repoDir, ext string) error {
-	path := filepath.Join(repoDir, ".forge-formats")
+	path, err := migratePerRepoFile(repoDir, "formats", ".forge-formats")
+	if err != nil {
+		return err
+	}
 	existing, _ := os.ReadFile(path)
 	for _, line := range strings.Split(string(existing), "\n") {
 		line = strings.TrimSpace(line)
@@ -1771,7 +1824,7 @@ func addToForgeFormats(repoDir, ext string) error {
 func formatsRemoveCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "remove <extension>",
-		Short: "Remove a format from this repository's .forge-formats",
+		Short: "Remove a format from this repository's format list",
 		Args:  cobra.ExactArgs(1),
 		RunE:  runFormatsRemove,
 	}
@@ -1791,15 +1844,18 @@ func runFormatsRemove(_ *cobra.Command, args []string) error {
 	if err := removeFromGitAttributes(repoDir, ext); err != nil {
 		fmt.Fprintf(os.Stderr, "forge: warning: could not update .gitattributes: %v\n", err)
 	}
-	fmt.Printf("Removed %s from .forge-formats\n", ext)
+	fmt.Printf("Removed %s from .forge/formats\n", ext)
 	return nil
 }
 
 func removeFromForgeFormats(repoDir, ext string) error {
-	path := filepath.Join(repoDir, ".forge-formats")
+	path, err := migratePerRepoFile(repoDir, "formats", ".forge-formats")
+	if err != nil {
+		return err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf(".forge-formats not found")
+		return fmt.Errorf(".forge/formats not found")
 	}
 	var out []string
 	found := false
@@ -1820,7 +1876,7 @@ func removeFromForgeFormats(repoDir, ext string) error {
 		out = append(out, line)
 	}
 	if !found {
-		return fmt.Errorf("%s is not in .forge-formats", ext)
+		return fmt.Errorf("%s is not in .forge/formats", ext)
 	}
 	return os.WriteFile(path, []byte(strings.Join(out, "\n")), 0644)
 }
@@ -1926,7 +1982,7 @@ func runFormatsUpdate(_ *cobra.Command, args []string) error {
 
 	if dirty {
 		if err := saveForgeHandlers(repoDir, lockfile); err != nil {
-			fmt.Fprintf(os.Stderr, "forge: warning: could not save .forge-handlers: %v\n", err)
+			fmt.Fprintf(os.Stderr, "forge: warning: could not save .forge/handlers: %v\n", err)
 		}
 	}
 	return nil
