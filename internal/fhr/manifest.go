@@ -27,9 +27,12 @@ type FormatEntry struct {
 	Build   string `toml:"build"`
 }
 
-// AssetsSection holds download URLs keyed by handler → platform → URL.
+// AssetsSection holds download URLs keyed by handler → platform → URL, plus
+// renderer bundle URLs keyed by handler → URL (renderers are not platform-keyed;
+// one self-contained ESM bundle serves every consumer).
 type AssetsSection struct {
-	Handlers map[string]map[string]string `toml:"handlers"`
+	Handlers  map[string]map[string]string `toml:"handlers"`
+	Renderers map[string]string            `toml:"renderers"`
 }
 
 // FetchManifest downloads and parses manifest.toml from the given URL.
@@ -83,6 +86,20 @@ func (m *FHRManifest) HandlerAssetURL(handlerID, platformKey string) (string, er
 	assetPath, ok := platforms[platformKey]
 	if !ok {
 		return "", fmt.Errorf("handler %q: no asset for platform %q", handlerID, platformKey)
+	}
+	if strings.HasPrefix(assetPath, "http://") || strings.HasPrefix(assetPath, "https://") {
+		return assetPath, nil
+	}
+	base := strings.TrimSuffix(m.URL, "/")
+	return base + "/" + assetPath, nil
+}
+
+// RendererAssetURL returns the full download URL for a handler's renderer bundle.
+// Relative asset paths are resolved against the manifest's url field.
+func (m *FHRManifest) RendererAssetURL(handlerID string) (string, error) {
+	assetPath, ok := m.Assets.Renderers[handlerID]
+	if !ok {
+		return "", fmt.Errorf("handler %q has no renderer in this source", handlerID)
 	}
 	if strings.HasPrefix(assetPath, "http://") || strings.HasPrefix(assetPath, "https://") {
 		return assetPath, nil

@@ -180,6 +180,32 @@ forge diff character.blend  (no BlenderHandler installed)
 
 ---
 
+## Local web diff — `forge diff --web`
+
+The terminal is fine for a change tree, but some formats read better in a
+browser. `forge diff --web <file>` computes the semantic diff locally with the
+installed handler, then serves the format's FHR renderer bundle to a
+loopback-only page and opens it:
+
+```
+forge diff --web models/robot.glb
+  → resolve gltf-scene handler + its renderer (~/.forge/renderers/gltf-scene.js,
+    downloaded on demand from a configured source if absent)
+  → handler.Diff(base, head) → StructuredDiff
+  → serve http://127.0.0.1:<port>/ : renderer bundle + diff.json + blobs
+  → open the browser; Ctrl-C to stop
+```
+
+Nothing leaves the machine — blobs are read from the local git object database
+and working tree, and the page runs under a Content-Security-Policy that blocks
+every external request. This is the local, zero-server counterpart to viewing a
+diff on ForgeHub: the same renderer bundle mounts the same `StructuredDiff`,
+just computed by your `forge` instead of the server. `--no-open` prints the URL
+without launching a browser. Renderer bundles are installed alongside handlers
+by `forge formats add`.
+
+---
+
 ## Handler Ecosystem
 
 ### Official handlers
