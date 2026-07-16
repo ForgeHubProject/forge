@@ -18,6 +18,22 @@ This document specifies the `.forge-formats` file, the `forge source` and
 `forge formats` CLI commands, and how they integrate with the broader FHR
 (Forge-Handler-Repository) ecosystem.
 
+> **How the pieces fit (issue #34).** Three distinct layers, easy to conflate:
+> - **`forge source …`** manages a **global** registry list (`~/.forge/sources.list`).
+>   Adding a source does **not** touch any repo — it only makes handlers
+>   *available* to install.
+> - **`forge formats add <ext>`** is **per-repo**: it records the extension in
+>   `.forge/formats` and, if a source advertises a handler, installs it and pins
+>   the build in `.forge/handlers`. Run it before any source exists and the
+>   extension is recorded but **inactive** (no handler) until you add a source
+>   and re-run — the command says so.
+> - **`.forge/handlers`** is the per-repo lockfile of installed handler builds.
+>
+> Shortcuts: `forge formats add` with no argument scans tracked files and adds
+> every extension a source can handle (`--all` to add all discovered);
+> `forge formats update` (re)installs handlers for extensions already listed but
+> not yet installed — the "reconcile after clone" step.
+
 `.forge-formats` complements the existing `.forge/handlers` domain manifest.
 Where `.forge/handlers` declares which **handler domains** a repo depends on
 (the broad family level), `.forge-formats` declares which specific **file
