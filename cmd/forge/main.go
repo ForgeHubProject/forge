@@ -1971,36 +1971,24 @@ func runFormats(_ *cobra.Command, _ []string) error {
 
 func formatsAddCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "add <extension>",
-		Short: "Add a format to this repo and install its handler",
-		Args:  cobra.ExactArgs(1),
+		Use:   "add [extension]",
+		Short: "Add a format to this repo and install its handler (no arg: scan the repo)",
+		Args:  cobra.MaximumNArgs(1),
 		RunE:  runFormatsAdd,
 	}
 	cmd.Flags().String("source", "", "Source name to search (default: all configured sources)")
+	cmd.Flags().Bool("all", false, "With no extension: add every discovered format, even ones with no handler")
 	return cmd
 }
 
 func runFormatsAdd(cmd *cobra.Command, args []string) error {
-	ext := args[0]
-	if !strings.HasPrefix(ext, ".") {
-		ext = "." + ext
-	}
-	ext = strings.ToLower(ext)
 	sourceName, _ := cmd.Flags().GetString("source")
-
+	all, _ := cmd.Flags().GetBool("all")
 	repoDir := findRepoRoot()
-	if err := addToForgeFormats(repoDir, ext); err != nil {
-		return fmt.Errorf("updating .forge/formats: %w", err)
-	}
 
 	sources, err := fhr.LoadSources()
 	if err != nil {
 		return err
-	}
-	if len(sources) == 0 {
-		fmt.Printf("Added %s to .forge/formats\n", ext)
-		fmt.Println("No handler sources configured — run: forge source add <url>")
-		return nil
 	}
 	if sourceName != "" {
 		var found fhr.Source
@@ -2016,6 +2004,43 @@ func runFormatsAdd(cmd *cobra.Command, args []string) error {
 		sources = []fhr.Source{found}
 	}
 
+	// No extension: scan the working tree and bulk-add discovered formats.
+	if len(args) == 0 {
+		return runFormatsAddBulk(repoDir, sources, all)
+	}
+
+	ext := args[0]
+	if !strings.HasPrefix(ext, ".") {
+		ext = "." + ext
+	}
+	ext = strings.ToLower(ext)
+
+	if err := addToForgeFormats(repoDir, ext); err != nil {
+		return fmt.Errorf("updating .forge/formats: %w", err)
+	}
+	if len(sources) == 0 {
+		fmt.Printf("Added %s to .forge/formats (inactive — no handler yet).\n", ext)
+		fmt.Printf("Install one: forge source add <url>, then re-run: forge formats add %s\n", ext)
+		return nil
+	}
+
+	resolved, err := resolveAndInstall(repoDir, sources, ext)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Added %s to .forge/formats\n", ext)
+	if !resolved {
+		fmt.Printf("No handler found for %s in any configured source — recorded but inactive.\n", ext)
+		fmt.Printf("  Add a source (forge source add <url>) or ignore it: forge formats ignore %s\n", ext)
+	}
+	return nil
+}
+
+// resolveAndInstall finds a handler for ext among the sources and installs it
+// (binary, renderer bundle, and .forge/handlers pin). It does NOT modify
+// .forge/formats — the caller decides when to record the extension. Returns
+// whether a handler was resolved and installed.
+func resolveAndInstall(repoDir string, sources []fhr.Source, ext string) (bool, error) {
 	for _, src := range sources {
 		m, err := fhr.FetchManifest(src.URL)
 		if err != nil {
@@ -2046,12 +2071,11 @@ func runFormatsAdd(cmd *cobra.Command, args []string) error {
 			if fhr.InstalledRenderer(handlerID) == "" {
 				maybeInstallRenderer(m, handlerID, src.URL)
 			}
-			fmt.Printf("Added %s to .forge/formats\n", ext)
-			return nil
+			return true, nil
 		}
 		binary, err := fhr.DownloadHandler(m, handlerID, src.URL)
 		if err != nil {
-			return err
+			return false, err
 		}
 		fmt.Printf("Installed: %s\n", binary)
 		maybeInstallRenderer(m, handlerID, src.URL)
@@ -2064,13 +2088,93 @@ func runFormatsAdd(cmd *cobra.Command, args []string) error {
 		if err := saveForgeHandlers(repoDir, handlers); err != nil {
 			fmt.Fprintf(os.Stderr, "forge: warning: could not update .forge/handlers: %v\n", err)
 		}
-		fmt.Printf("Added %s to .forge/formats\n", ext)
+		return true, nil
+	}
+	return false, nil
+}
+
+// runFormatsAddBulk scans the working tree for extensions not yet included or
+// ignored, and adds the ones a configured source can handle (reporting the
+// rest). With all=true it adds every discovered extension regardless.
+func runFormatsAddBulk(repoDir string, sources []fhr.Source, all bool) error {
+	discovered, err := discoverRepoExtensions(repoDir)
+	if err != nil {
+		return err
+	}
+	included := loadForgeFormats(repoDir)
+	ignored := loadIgnoredFormats(repoDir)
+
+	var candidates []string
+	for _, ext := range discovered {
+		if !included[ext] && !ignored[ext] {
+			candidates = append(candidates, ext)
+		}
+	}
+	if len(candidates) == 0 {
+		fmt.Println("No new formats found — every tracked extension is already added or ignored.")
+		return nil
+	}
+	if len(sources) == 0 && !all {
+		fmt.Printf("Found unregistered formats: %s\n", strings.Join(candidates, ", "))
+		fmt.Println("No handler sources configured — run: forge source add <url> (or: forge formats add --all to add them anyway).")
 		return nil
 	}
 
-	fmt.Printf("Added %s to .forge/formats\n", ext)
-	fmt.Printf("No handler found for %s in any configured source.\n", ext)
+	var added, noHandler []string
+	for _, ext := range candidates {
+		resolved, err := resolveAndInstall(repoDir, sources, ext)
+		if err != nil {
+			return err
+		}
+		if resolved || all {
+			if err := addToForgeFormats(repoDir, ext); err != nil {
+				return err
+			}
+			added = append(added, ext)
+		} else {
+			noHandler = append(noHandler, ext)
+		}
+	}
+
+	if len(added) > 0 {
+		fmt.Printf("Added %d format(s) to .forge/formats: %s\n", len(added), strings.Join(added, ", "))
+	}
+	if len(noHandler) > 0 {
+		fmt.Printf("Found but no handler (not added): %s\n", strings.Join(noHandler, ", "))
+		fmt.Println("  Add explicitly: forge formats add <ext>   ·   ignore: forge formats ignore <ext>")
+	}
 	return nil
+}
+
+// discoverRepoExtensions returns the distinct, lower-cased file extensions of
+// the repo's git-tracked files (so build artifacts and .gitignore'd paths are
+// excluded). Extension-less files and dotfiles are skipped.
+func discoverRepoExtensions(repoDir string) ([]string, error) {
+	cmd := exec.Command("git", "ls-files")
+	cmd.Dir = repoDir
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("listing tracked files: %w", err)
+	}
+	seen := map[string]bool{}
+	var exts []string
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.TrimSpace(line)
+		if f == "" {
+			continue
+		}
+		base := filepath.Base(f)
+		e := strings.ToLower(filepath.Ext(base))
+		if e == "" || e == base { // no extension, or a dotfile like .gitignore
+			continue
+		}
+		if !seen[e] {
+			seen[e] = true
+			exts = append(exts, e)
+		}
+	}
+	sort.Strings(exts)
+	return exts, nil
 }
 
 // addToForgeFormats marks ext as included, flipping it out of the ignore list
