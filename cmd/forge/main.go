@@ -166,7 +166,9 @@ func loadForgeFormats(repoDir string) map[string]bool {
 	exts := map[string]bool{}
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
+		// A leading '!' marks an ignored format — tracked by git but deliberately
+		// given no handler; it is not an active/included extension.
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "!") {
 			continue
 		}
 		if !strings.HasPrefix(line, ".") {
@@ -175,6 +177,95 @@ func loadForgeFormats(repoDir string) map[string]bool {
 		exts[strings.ToLower(line)] = true
 	}
 	return exts
+}
+
+// loadIgnoredFormats returns the extensions the repo has explicitly ignored
+// (lines prefixed with '!' in .forge/formats).
+func loadIgnoredFormats(repoDir string) map[string]bool {
+	data, err := os.ReadFile(perRepoFilePath(repoDir, "formats", ".forge-formats"))
+	if err != nil {
+		return nil
+	}
+	exts := map[string]bool{}
+	for _, line := range strings.Split(string(data), "\n") {
+		ext, marker := parseFormatLine(strings.TrimSpace(line))
+		if marker == "!" && ext != "" {
+			exts[ext] = true
+		}
+	}
+	return exts
+}
+
+// parseFormatLine normalizes one .forge/formats line into (ext, marker), where
+// marker is "!" for an ignored entry or "" for an included one. Comment and
+// blank lines yield ("", ""). The returned ext is lower-cased and dot-prefixed.
+func parseFormatLine(trimmed string) (ext, marker string) {
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return "", ""
+	}
+	s := trimmed
+	if strings.HasPrefix(s, "!") {
+		marker = "!"
+		s = strings.TrimSpace(s[1:])
+	}
+	if s == "" {
+		return "", marker
+	}
+	if !strings.HasPrefix(s, ".") {
+		s = "." + s
+	}
+	return strings.ToLower(s), marker
+}
+
+// setForgeFormat rewrites .forge/formats so ext carries exactly the given marker
+// ("" = included, "!" = ignored), replacing any existing entry for ext (so
+// add<->ignore flips cleanly). Comments and blank lines are preserved. Returns
+// whether the file content changed.
+func setForgeFormat(repoDir, ext, marker string) (bool, error) {
+	path, err := migratePerRepoFile(repoDir, "formats", ".forge-formats")
+	if err != nil {
+		return false, err
+	}
+	existing, _ := os.ReadFile(path)
+
+	lines := strings.Split(string(existing), "\n")
+	// Drop the trailing empty element a final newline produces, so re-adding
+	// doesn't insert a phantom blank line.
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+
+	var out []string
+	changed := false
+	kept := false
+	for _, line := range lines {
+		e, m := parseFormatLine(strings.TrimSpace(line))
+		if e == ext && e != "" {
+			if m == marker && !kept {
+				kept = true
+				out = append(out, marker+ext) // normalize spacing/case
+				if strings.TrimSpace(line) != marker+ext {
+					changed = true
+				}
+			} else {
+				changed = true // drop a wrong-marker or duplicate entry
+			}
+			continue
+		}
+		out = append(out, line)
+	}
+	if !kept {
+		out = append(out, marker+ext)
+		changed = true
+	}
+	if !changed {
+		return false, nil
+	}
+	content := strings.Join(out, "\n")
+	if content != "" {
+		content += "\n"
+	}
+	return true, os.WriteFile(path, []byte(content), 0644)
 }
 
 // loadForgeHandlers reads the .forge/handlers lockfile and returns
@@ -1688,8 +1779,10 @@ func sourceListCmd() *cobra.Command {
 				fmt.Println("Add one with: forge source add <url>")
 				return nil
 			}
-			for _, s := range sources {
-				fmt.Printf("%-20s %s\n", s.Name, s.URL)
+			// Index is a display convenience for `forge source remove <index>`;
+			// it is stable only within a single list→remove cycle.
+			for i, s := range sources {
+				fmt.Printf("%3d  %-20s %s\n", i+1, s.Name, s.URL)
 			}
 			return nil
 		},
@@ -1726,21 +1819,69 @@ func sourceUpdateCmd() *cobra.Command {
 	}
 }
 
+// resolveSourceSelectors maps each selector (a 1-based list index or a source
+// name) to a concrete source name, resolving all against the given snapshot
+// before any mutation so index selections don't shift as entries are removed.
+// Returns an error on the first out-of-range index or unknown name (removing
+// nothing); the result is de-duplicated and preserves selector order.
+func resolveSourceSelectors(sources []fhr.Source, args []string) ([]string, error) {
+	seen := map[string]bool{}
+	var names []string
+	for _, sel := range args {
+		var match *fhr.Source
+		if n, convErr := strconv.Atoi(sel); convErr == nil {
+			if n < 1 || n > len(sources) {
+				return nil, fmt.Errorf("index %d out of range (1..%d) — run: forge source list", n, len(sources))
+			}
+			match = &sources[n-1]
+		} else {
+			for i := range sources {
+				if sources[i].Name == sel {
+					match = &sources[i]
+					break
+				}
+			}
+			if match == nil {
+				return nil, fmt.Errorf("source %q not found — run: forge source list", sel)
+			}
+		}
+		if !seen[match.Name] {
+			seen[match.Name] = true
+			names = append(names, match.Name)
+		}
+	}
+	return names, nil
+}
+
 func sourceRemoveCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "remove <name>",
-		Short: "Remove a handler source",
-		Args:  cobra.ExactArgs(1),
+		Use:   "remove <index|name>...",
+		Short: "Remove one or more handler sources by list index or name",
+		Args:  cobra.MinimumNArgs(1),
 		RunE:  runSourceRemove,
 	}
 }
 
 func runSourceRemove(_ *cobra.Command, args []string) error {
-	name := args[0]
-	if err := fhr.RemoveSource(name); err != nil {
+	sources, err := fhr.LoadSources()
+	if err != nil {
 		return err
 	}
-	fmt.Printf("Removed source %q\n", name)
+	if len(sources) == 0 {
+		return fmt.Errorf("no sources configured")
+	}
+
+	names, err := resolveSourceSelectors(sources, args)
+	if err != nil {
+		return err
+	}
+
+	for _, name := range names {
+		if err := fhr.RemoveSource(name); err != nil {
+			return err
+		}
+		fmt.Printf("Removed source %q\n", name)
+	}
 	return nil
 }
 
@@ -1752,14 +1893,39 @@ func formatsCmd() *cobra.Command {
 		Short: "Manage format handlers for this repository",
 		RunE:  runFormats,
 	}
-	cmd.AddCommand(formatsAddCmd(), formatsRemoveCmd(), formatsUpdateCmd(), formatsListCmd())
+	cmd.AddCommand(formatsAddCmd(), formatsIgnoreCmd(), formatsRemoveCmd(), formatsUpdateCmd(), formatsListCmd())
 	return cmd
+}
+
+func formatsIgnoreCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "ignore <extension>",
+		Short: "Mark a format as ignored (tracked by git, no semantic handler)",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runFormatsIgnore,
+	}
+}
+
+func runFormatsIgnore(_ *cobra.Command, args []string) error {
+	ext := args[0]
+	if !strings.HasPrefix(ext, ".") {
+		ext = "." + ext
+	}
+	ext = strings.ToLower(ext)
+
+	repoDir := findRepoRoot()
+	if err := ignoreInForgeFormats(repoDir, ext); err != nil {
+		return fmt.Errorf("updating .forge/formats: %w", err)
+	}
+	fmt.Printf("Ignoring %s (tracked, no handler). Undo with: forge formats add %s\n", ext, ext)
+	return nil
 }
 
 func runFormats(_ *cobra.Command, _ []string) error {
 	repoDir := findRepoRoot()
 	forgeFormats := loadForgeFormats(repoDir)
-	if len(forgeFormats) == 0 {
+	ignored := loadIgnoredFormats(repoDir)
+	if len(forgeFormats) == 0 && len(ignored) == 0 {
 		fmt.Println("No formats configured for this repository.")
 		fmt.Println("Add one with: forge formats add <extension>")
 		return nil
@@ -1778,13 +1944,27 @@ func runFormats(_ *cobra.Command, _ []string) error {
 	}
 	sort.Strings(exts)
 
-	fmt.Printf("%-12s  %-12s  %s\n", "EXTENSION", "STATUS", "HANDLER")
-	for _, ext := range exts {
-		if meta, ok := installed[ext]; ok {
-			fmt.Printf("%-12s  %-12s  %s (%s)\n", ext, "installed", meta.ID, meta.Build)
-		} else {
-			fmt.Printf("%-12s  %-12s  (run: forge formats add %s)\n", ext, "missing", ext)
+	if len(exts) > 0 {
+		fmt.Printf("%-12s  %-12s  %s\n", "EXTENSION", "STATUS", "HANDLER")
+		for _, ext := range exts {
+			if meta, ok := installed[ext]; ok {
+				fmt.Printf("%-12s  %-12s  %s (%s)\n", ext, "installed", meta.ID, meta.Build)
+			} else {
+				fmt.Printf("%-12s  %-12s  (run: forge formats add %s)\n", ext, "missing", ext)
+			}
 		}
+	}
+
+	if len(ignored) > 0 {
+		ignoredExts := make([]string, 0, len(ignored))
+		for ext := range ignored {
+			ignoredExts = append(ignoredExts, ext)
+		}
+		sort.Strings(ignoredExts)
+		if len(exts) > 0 {
+			fmt.Println()
+		}
+		fmt.Printf("Ignored (tracked, no handler): %s\n", strings.Join(ignoredExts, ", "))
 	}
 	return nil
 }
@@ -1893,34 +2073,18 @@ func runFormatsAdd(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// addToForgeFormats marks ext as included, flipping it out of the ignore list
+// if it was previously ignored.
 func addToForgeFormats(repoDir, ext string) error {
-	path, err := migratePerRepoFile(repoDir, "formats", ".forge-formats")
-	if err != nil {
-		return err
-	}
-	existing, _ := os.ReadFile(path)
-	for _, line := range strings.Split(string(existing), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if !strings.HasPrefix(line, ".") {
-			line = "." + line
-		}
-		if strings.ToLower(line) == ext {
-			return nil
-		}
-	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if len(existing) > 0 && !bytes.HasSuffix(existing, []byte("\n")) {
-		fmt.Fprintln(f)
-	}
-	fmt.Fprintln(f, ext)
-	return nil
+	_, err := setForgeFormat(repoDir, ext, "")
+	return err
+}
+
+// ignoreInForgeFormats marks ext as ignored (tracked by git, no handler),
+// flipping it out of the included list if it was previously added.
+func ignoreInForgeFormats(repoDir, ext string) error {
+	_, err := setForgeFormat(repoDir, ext, "!")
+	return err
 }
 
 func formatsRemoveCmd() *cobra.Command {
@@ -1967,11 +2131,8 @@ func removeFromForgeFormats(repoDir, ext string) error {
 			out = append(out, line)
 			continue
 		}
-		normalized := trimmed
-		if !strings.HasPrefix(normalized, ".") {
-			normalized = "." + normalized
-		}
-		if strings.ToLower(normalized) == ext {
+		// Match either an included (".ext") or ignored ("!.ext") entry.
+		if e, _ := parseFormatLine(trimmed); e == ext {
 			found = true
 			continue
 		}
