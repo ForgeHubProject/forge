@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/forgehubproject/forge/internal/fhr"
 )
 
 func writeFileT(t *testing.T, path, content string) {
@@ -90,6 +92,88 @@ func TestRemoveFromForgeFormats(t *testing.T) {
 
 	if err := removeFromForgeFormats(repo, ".gltf"); err == nil {
 		t.Fatal("expected error removing an extension that is not listed")
+	}
+}
+
+func TestForgeFormatsIgnoreAndFlip(t *testing.T) {
+	repo := t.TempDir()
+
+	// Ignoring a fresh ext records it as ignored, not active.
+	if err := ignoreInForgeFormats(repo, ".tif"); err != nil {
+		t.Fatal(err)
+	}
+	if loadForgeFormats(repo)[".tif"] {
+		t.Fatal(".tif should not be an active format after ignore")
+	}
+	if !loadIgnoredFormats(repo)[".tif"] {
+		t.Fatal(".tif should be listed as ignored")
+	}
+
+	// add flips an ignored ext to included (no contradictory double entry).
+	if err := addToForgeFormats(repo, ".tif"); err != nil {
+		t.Fatal(err)
+	}
+	if !loadForgeFormats(repo)[".tif"] || loadIgnoredFormats(repo)[".tif"] {
+		t.Fatalf("add should flip .tif to included, got active=%v ignored=%v",
+			loadForgeFormats(repo)[".tif"], loadIgnoredFormats(repo)[".tif"])
+	}
+	data, _ := os.ReadFile(filepath.Join(repo, ".forge", "formats"))
+	if string(data) != ".tif\n" {
+		t.Fatalf("expected a single '.tif' entry after flip, got %q", string(data))
+	}
+
+	// ignore flips it back.
+	if err := ignoreInForgeFormats(repo, ".tif"); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(filepath.Join(repo, ".forge", "formats"))
+	if string(data) != "!.tif\n" {
+		t.Fatalf("expected '!.tif' after re-ignore, got %q", string(data))
+	}
+}
+
+func TestForgeFormatsIgnorePreservesIncludedAndComments(t *testing.T) {
+	repo := t.TempDir()
+	writeFileT(t, filepath.Join(repo, ".forge", "formats"), "# assets\n.gltf\n.glb\n")
+
+	if err := ignoreInForgeFormats(repo, ".tif"); err != nil {
+		t.Fatal(err)
+	}
+	active := loadForgeFormats(repo)
+	if !active[".gltf"] || !active[".glb"] || active[".tif"] {
+		t.Fatalf("unexpected active set: %v", active)
+	}
+	// removeFromForgeFormats clears an ignored entry too.
+	if err := removeFromForgeFormats(repo, ".tif"); err != nil {
+		t.Fatal(err)
+	}
+	if loadIgnoredFormats(repo)[".tif"] {
+		t.Fatal(".tif should be gone after remove")
+	}
+}
+
+func TestResolveSourceSelectors(t *testing.T) {
+	sources := []fhr.Source{{Name: "a"}, {Name: "b"}, {Name: "c"}}
+
+	got, err := resolveSourceSelectors(sources, []string{"1", "c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != "a" || got[1] != "c" {
+		t.Fatalf("index+name mix: got %v", got)
+	}
+
+	// Duplicate selectors (index and name for the same source) collapse to one.
+	got, _ = resolveSourceSelectors(sources, []string{"2", "b"})
+	if len(got) != 1 || got[0] != "b" {
+		t.Fatalf("expected dedup to single 'b', got %v", got)
+	}
+
+	if _, err := resolveSourceSelectors(sources, []string{"9"}); err == nil {
+		t.Fatal("expected out-of-range index to error")
+	}
+	if _, err := resolveSourceSelectors(sources, []string{"nope"}); err == nil {
+		t.Fatal("expected unknown name to error")
 	}
 }
 

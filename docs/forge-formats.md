@@ -7,6 +7,12 @@
 > automatically the next time forge writes to them. Note the implemented file
 > format is a plain line-based extension list (one per line, `#` comments), not
 > the TOML sketched below — this document predates the implementation.
+>
+> **Ignore marker (issue #31):** the implemented `[ignore]` state is a leading
+> `!` on the extension line — `!.tif` means ignored (tracked by git, no
+> handler, no prompt), a plain `.gltf` means included. `forge formats ignore
+> <ext>` and `forge formats add <ext>` flip an extension between the two, and
+> `forge formats remove <ext>` clears either.
 
 This document specifies the `.forge-formats` file, the `forge source` and
 `forge formats` CLI commands, and how they integrate with the broader FHR
