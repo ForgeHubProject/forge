@@ -1045,6 +1045,7 @@ func diffFileWeb(repo *gitrepo.Repo, reg *handler.Registry, path string, openBro
 		Mode:       "diff",
 		DiffJSON:   diffJSON,
 		RendererJS: rendererPath,
+		Renderer3D: fhr.InstalledRenderer3D(handlerID),
 		Base:       base,
 		Head:       head,
 	}, openBrowser)
