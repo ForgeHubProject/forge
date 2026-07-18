@@ -21,6 +21,7 @@ type Payload struct {
 	Mode       string // "diff" (default) or "merge"
 	DiffJSON   []byte // marshaled StructuredDiff
 	RendererJS string // path to the installed renderer bundle
+	Renderer3D string // path to the renderer's optional lazy 3D chunk (may be "")
 	Base       []byte // HEAD blob (may be nil)
 	Head       []byte // working-tree blob (may be nil)
 }
@@ -69,6 +70,16 @@ func (p Payload) handler() http.Handler {
 		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 		http.ServeFile(w, r, p.RendererJS)
 	})
+
+	// The lite bundle lazy-imports its 3D chunk as a sibling, e.g.
+	// /renderer-gltf-scene-3d.js. Serve it when the handler ships one; without
+	// it, "View in 3D" degrades gracefully in the bundle.
+	if p.Renderer3D != "" {
+		mux.HandleFunc("/renderer-"+p.HandlerID+"-3d.js", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+			http.ServeFile(w, r, p.Renderer3D)
+		})
+	}
 
 	mux.HandleFunc("/diff.json", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
