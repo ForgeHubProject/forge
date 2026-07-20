@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -149,6 +150,43 @@ func TestForgeFormatsIgnorePreservesIncludedAndComments(t *testing.T) {
 	}
 	if loadIgnoredFormats(repo)[".tif"] {
 		t.Fatal(".tif should be gone after remove")
+	}
+}
+
+func TestGitUntrackedFilesRespectsGitignoreAndCollapsesDirs(t *testing.T) {
+	repo := t.TempDir()
+	git := func(args ...string) {
+		c := exec.Command("git", args...)
+		c.Dir = repo
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init")
+	git("config", "user.email", "t@example.com")
+	git("config", "user.name", "t")
+	writeFileT(t, filepath.Join(repo, ".gitignore"), "ignored.log\nbuild/\n")
+	writeFileT(t, filepath.Join(repo, "README.md"), "hi")
+	git("add", "README.md", ".gitignore")
+	git("commit", "-m", "init")
+
+	writeFileT(t, filepath.Join(repo, "ignored.log"), "noise") // gitignored → excluded
+	writeFileT(t, filepath.Join(repo, "notes.txt"), "x")       // untracked file → shown
+	writeFileT(t, filepath.Join(repo, "build", "a.o"), "x")    // ignored dir → excluded
+	writeFileT(t, filepath.Join(repo, "out", "x.bin"), "x")    // untracked dir → collapses
+
+	set := map[string]bool{}
+	for _, p := range gitUntrackedFiles(repo) {
+		set[p] = true
+	}
+	if set["ignored.log"] || set["build/"] {
+		t.Fatalf("gitignored entries leaked: %v", set)
+	}
+	if !set["notes.txt"] {
+		t.Fatalf("expected notes.txt in untracked, got %v", set)
+	}
+	if !set["out/"] {
+		t.Fatalf("expected wholly-untracked dir collapsed to out/, got %v", set)
 	}
 }
 

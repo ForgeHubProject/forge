@@ -426,12 +426,13 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	}
 	sort.Strings(paths)
 
-	var stagedPaths, unstagedPaths, untrackedPaths []string
+	var stagedPaths, unstagedPaths []string
 	for _, p := range paths {
 		fs := st[p]
 		s, w := rune(fs.Staging), rune(fs.Worktree)
 		if s == '?' && w == '?' {
-			untrackedPaths = append(untrackedPaths, p)
+			// Untracked files come from git below — go-git's Status() has only
+			// partial .gitignore support and doesn't collapse untracked dirs.
 			continue
 		}
 		if s != ' ' && s != '?' {
@@ -440,6 +441,19 @@ func runStatus(_ *cobra.Command, _ []string) error {
 		if w != ' ' && w != '?' {
 			unstagedPaths = append(unstagedPaths, p)
 		}
+	}
+
+	// Untracked list defers to git for the full ignore stack (.gitignore, nested
+	// .gitignores, .git/info/exclude, core.excludesFile) and git's directory
+	// collapsing — the source of truth forge wraps. Path-level ignoring is
+	// .gitignore's job; forge's own ignoring is format-level (forge formats ignore).
+	untrackedPaths := gitUntrackedFiles(cwd)
+
+	// go-git may report "not clean" purely because of ignored files it surfaces
+	// as untracked; if git disagrees and there are no real changes, we're clean.
+	if len(stagedPaths) == 0 && len(unstagedPaths) == 0 && len(untrackedPaths) == 0 {
+		fmt.Println("nothing to commit, working tree clean")
+		return nil
 	}
 
 	statusWord := func(code rune) string {
@@ -470,6 +484,12 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	}
 
 	printUntrackedEntry := func(p string) {
+		// git collapses a wholly-untracked directory to "dir/" — no per-file
+		// handler applies, so print it bare, matching git.
+		if strings.HasSuffix(p, "/") {
+			fmt.Printf("\x1b[31m\t%-49s\x1b[0m\n", p)
+			return
+		}
 		label := handlerLabel(p, reg)
 		fmt.Printf("\x1b[31m\t%-49s\x1b[0m %s\n", p, label)
 	}
@@ -503,6 +523,33 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	}
 
 	return nil
+}
+
+// gitUntrackedFiles returns the untracked paths git itself would show —
+// respecting the full ignore stack (.gitignore, nested .gitignores,
+// .git/info/exclude, core.excludesFile) and collapsing wholly-untracked
+// directories to a single "dir/" entry, exactly like `git status`. forge wraps
+// git and stores git objects, so it defers to git's ignore semantics rather
+// than go-git's partial Status() implementation.
+func gitUntrackedFiles(dir string) []string {
+	root := dir
+	if top, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").Output(); err == nil {
+		root = strings.TrimSpace(string(top))
+	}
+	cmd := exec.Command("git", "ls-files", "--others", "--exclude-standard", "--directory", "--no-empty-directory")
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	var paths []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line != "" {
+			paths = append(paths, line)
+		}
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 func handlerLabel(path string, reg *handler.Registry) string {
