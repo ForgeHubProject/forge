@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // RendererMeta records a renderer bundle installed under ~/.forge/renderers.
@@ -26,6 +27,17 @@ func RenderersDir() (string, error) {
 }
 
 func rendererFileName(handlerID string) string { return handlerID + ".js" }
+
+// renderer3DFileName is the optional heavy "3D chunk" a renderer bundle may
+// lazy-load (e.g. gltf-scene's three.js viewport). Stored next to the main
+// bundle so `forge diff --web` can serve it as a sibling.
+func renderer3DFileName(handlerID string) string { return handlerID + "-3d.js" }
+
+// chunk3DURL derives the lazy 3D chunk URL from a renderer asset URL by the
+// published naming convention: renderer-<h>.js → renderer-<h>-3d.js.
+func chunk3DURL(rendererURL string) string {
+	return strings.TrimSuffix(rendererURL, ".js") + "-3d.js"
+}
 
 // DownloadRenderer downloads a handler's renderer bundle from the manifest and
 // installs it under ~/.forge/renderers. Returns the path to the installed bundle.
@@ -57,7 +69,30 @@ func DownloadRenderer(m *FHRManifest, handlerID, sourceURL string) (string, erro
 	if data, err := json.MarshalIndent(meta, "", "  "); err == nil {
 		_ = os.WriteFile(bundlePath+".json", data, 0644)
 	}
+
+	// Best-effort: some renderers lazy-load a heavy "3D chunk" sibling (e.g.
+	// gltf-scene's three.js viewport). Fetch it if the release publishes one so
+	// `forge diff --web` can serve it; a 404 just means this handler has none.
+	chunkPath := filepath.Join(renderersDir, renderer3DFileName(handlerID))
+	if _, err := downloadFile(chunk3DURL(assetURL), chunkPath); err != nil {
+		_ = os.Remove(chunkPath) // clear any stale chunk from a prior release
+	}
+
 	return bundlePath, nil
+}
+
+// InstalledRenderer3D returns the path to an installed renderer's optional 3D
+// chunk, or "" if the handler has none.
+func InstalledRenderer3D(handlerID string) string {
+	renderersDir, err := RenderersDir()
+	if err != nil {
+		return ""
+	}
+	p := filepath.Join(renderersDir, renderer3DFileName(handlerID))
+	if _, err := os.Stat(p); err != nil {
+		return ""
+	}
+	return p
 }
 
 // InstalledRenderer returns the path to an installed renderer bundle, or "" if absent.
