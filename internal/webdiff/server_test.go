@@ -94,3 +94,31 @@ func TestNilBlob404(t *testing.T) {
 		t.Fatalf("nil blob status = %d, want 404", resp.StatusCode)
 	}
 }
+
+func TestServes3DChunkWhenPresent(t *testing.T) {
+	p := newTestPayload(t) // HandlerID == "gltf-scene"
+	dir := t.TempDir()
+	chunk := filepath.Join(dir, "gltf-scene-3d.js")
+	if err := os.WriteFile(chunk, []byte("export default { mount3d(){} };\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	p.Renderer3D = chunk
+	h := withCSP(p.handler())
+
+	resp := doGet(t, h, "/renderer-gltf-scene-3d.js")
+	if resp.StatusCode != 200 {
+		t.Fatalf("3D chunk status = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "mount3d") {
+		t.Fatalf("3D chunk body not served; got %q", string(body))
+	}
+}
+
+func TestNo3DChunkRouteWhenAbsent(t *testing.T) {
+	p := newTestPayload(t) // Renderer3D == ""
+	h := withCSP(p.handler())
+	if resp := doGet(t, h, "/renderer-gltf-scene-3d.js"); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 with no 3D chunk, got %d", resp.StatusCode)
+	}
+}
