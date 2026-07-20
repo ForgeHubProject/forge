@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/forgehubproject/forge/internal/fhr"
@@ -187,6 +188,31 @@ func TestGitUntrackedFilesRespectsGitignoreAndCollapsesDirs(t *testing.T) {
 	}
 	if !set["out/"] {
 		t.Fatalf("expected wholly-untracked dir collapsed to out/, got %v", set)
+	}
+}
+
+func TestDiscoverRepoExtensions(t *testing.T) {
+	repo := t.TempDir()
+	git := func(args ...string) {
+		c := exec.Command("git", args...)
+		c.Dir = repo
+		if err := c.Run(); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+	git("init")
+	for _, f := range []string{"a.glb", "b.GLTF", "sub/c.glb", "readme.md", "Makefile", ".gitignore"} {
+		writeFileT(t, filepath.Join(repo, f), "x")
+	}
+	git("add", "-A")
+
+	got, err := discoverRepoExtensions(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// distinct + lower-cased; extension-less (Makefile) and dotfiles (.gitignore) excluded.
+	if strings.Join(got, ",") != ".glb,.gltf,.md" {
+		t.Fatalf("unexpected extensions: %v", got)
 	}
 }
 
