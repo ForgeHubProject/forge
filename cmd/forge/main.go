@@ -852,7 +852,54 @@ func runLogin(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Logged in as %s.\n", email)
 	fmt.Printf("Credential stored via git's credential helper — git and forge will use it automatically for %s.\n", baseURL)
+
+	if info, err := fetchServerInfo(baseURL); err == nil && info.SSHEnabled {
+		host := info.SSHHost
+		if host == "" {
+			if u, err := url.Parse(baseURL); err == nil {
+				host = u.Hostname()
+			}
+		}
+		port := 22
+		if info.SSHPort != 0 {
+			port = info.SSHPort
+		}
+		fmt.Printf("\nSSH is enabled on this server (port %d).\n", port)
+		if info.SSHFingerprint != "" {
+			fmt.Printf("Host key fingerprint: %s\n", info.SSHFingerprint)
+		}
+		fmt.Printf("To trust this server's host key, run:\n")
+		fmt.Printf("  ssh-keyscan -p %d %s >> ~/.ssh/known_hosts\n", port, host)
+	}
+
 	return nil
+}
+
+type serverInfo struct {
+	SSHEnabled     bool   `json:"sshEnabled"`
+	SSHPort        int    `json:"sshPort"`
+	SSHHost        string `json:"sshHost"`
+	SSHFingerprint string `json:"sshFingerprint"`
+}
+
+func fetchServerInfo(baseURL string) (*serverInfo, error) {
+	resp, err := http.Get(baseURL + "/server/info")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("server returned %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var info serverInfo
+	if err := json.Unmarshal(data, &info); err != nil {
+		return nil, err
+	}
+	return &info, nil
 }
 
 func forgeHubLogin(baseURL, email, password string) (string, error) {
