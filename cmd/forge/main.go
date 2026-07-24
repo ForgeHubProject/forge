@@ -19,6 +19,8 @@ import (
 	"strings"
 
 	gogit "github.com/go-git/go-git/v5"
+	gogitconfig "github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing/transport"
 	gogithttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	gogitssh "github.com/go-git/go-git/v5/plumbing/transport/ssh"
 	"github.com/spf13/cobra"
@@ -69,6 +71,9 @@ func rootCmd() *cobra.Command {
 		gitPassthrough("rebase", "Reapply commits on top of another branch (delegates to git)"),
 		gitPassthrough("tag", "Create, list or delete tags (delegates to git)"),
 		gitPassthrough("remote", "Manage remote connections (delegates to git)"),
+		// Identity and git options live in git's config — the single source of
+		// truth forge reads through (issue #30). No forge-side config store.
+		gitPassthrough("config", "Get and set repository or global options (delegates to git)"),
 	)
 	return root
 }
@@ -403,6 +408,14 @@ func runStatus(_ *cobra.Command, _ []string) error {
 		}
 	}
 
+	// Surface .forge/formats drift (issue #34): a listed format with no
+	// installed handler is silently inactive — flag it with the repair command.
+	if missing := missingHandlerExts(cwd); len(missing) > 0 {
+		fmt.Printf("\x1b[33mwarning:\x1b[0m formats listed in .forge/formats with no installed handler: %s\n",
+			strings.Join(missing, ", "))
+		fmt.Println("         install them with: forge formats install")
+	}
+
 	wt, err := r.Worktree()
 	if err != nil {
 		return err
@@ -683,7 +696,15 @@ func runClone(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Cloning into '%s'...\n", dir)
 
 	_, err = gogit.PlainClone(dir, false, cloneOpts)
-	if err != nil {
+	if errors.Is(err, transport.ErrEmptyRemoteRepository) {
+		// Match git: cloning a freshly-created empty repo is a normal first
+		// step, not a failure. Leave an initialized local repo with `origin`
+		// configured so the usual add/commit/push flow works.
+		fmt.Println("warning: You appear to have cloned an empty repository.")
+		if initErr := initEmptyClone(dir, rawURL); initErr != nil {
+			return fmt.Errorf("clone failed: %w", initErr)
+		}
+	} else if err != nil {
 		return fmt.Errorf("clone failed: %w", err)
 	}
 
@@ -693,6 +714,26 @@ func runClone(cmd *cobra.Command, args []string) error {
 
 	reportMissingHandlers(dir)
 	return nil
+}
+
+// initEmptyClone recovers from go-git's ErrEmptyRemoteRepository: depending on
+// the version, PlainClone may or may not have left a usable repo behind, so
+// open-or-init the directory and make sure the `origin` remote is registered.
+func initEmptyClone(dir, rawURL string) error {
+	repo, err := gogit.PlainOpen(dir)
+	if err != nil {
+		if repo, err = gogit.PlainInit(dir, false); err != nil {
+			return err
+		}
+	}
+	if _, err := repo.Remote("origin"); err == nil {
+		return nil // PlainClone already registered it
+	}
+	_, err = repo.CreateRemote(&gogitconfig.RemoteConfig{
+		Name: "origin",
+		URLs: []string{rawURL},
+	})
+	return err
 }
 
 func buildCloneOptions(rawURL, token, sshKeyPath, sshPassword string) (*gogit.CloneOptions, error) {
@@ -911,10 +952,13 @@ func defaultSSHKey() string {
 	return filepath.Join(home, ".ssh", "id_ed25519")
 }
 
-func reportMissingHandlers(repoDir string) {
+// missingHandlerExts returns the extensions listed in .forge/formats that no
+// installed handler covers — the "half-configured repo" drift that clone and
+// status both warn about (issue #34).
+func missingHandlerExts(repoDir string) []string {
 	forgeFormats := loadForgeFormats(repoDir)
 	if len(forgeFormats) == 0 {
-		return
+		return nil
 	}
 
 	covered := map[string]bool{}
@@ -930,16 +974,22 @@ func reportMissingHandlers(repoDir string) {
 			missing = append(missing, ext)
 		}
 	}
+	sort.Strings(missing)
+	return missing
+}
+
+func reportMissingHandlers(repoDir string) {
+	missing := missingHandlerExts(repoDir)
 	if len(missing) == 0 {
 		return
 	}
 
-	sort.Strings(missing)
 	fmt.Println()
 	fmt.Println("This repository requires format handlers that are not installed:")
 	for _, ext := range missing {
-		fmt.Printf("  forge formats add %s\n", ext)
+		fmt.Printf("  %s\n", ext)
 	}
+	fmt.Println("Install them all with: forge formats install")
 	fmt.Println()
 }
 
@@ -1941,7 +1991,7 @@ func formatsCmd() *cobra.Command {
 		Short: "Manage format handlers for this repository",
 		RunE:  runFormats,
 	}
-	cmd.AddCommand(formatsAddCmd(), formatsIgnoreCmd(), formatsRemoveCmd(), formatsUpdateCmd(), formatsListCmd())
+	cmd.AddCommand(formatsAddCmd(), formatsIgnoreCmd(), formatsRemoveCmd(), formatsInstallCmd(), formatsUpdateCmd(), formatsListCmd())
 	return cmd
 }
 
@@ -2317,8 +2367,28 @@ func formatsUpdateCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "update [extension]",
 		Short: "Update installed handler(s) if a newer build is available",
-		Args:  cobra.MaximumNArgs(1),
-		RunE:  runFormatsUpdate,
+		Long: "Updates the handlers for this repo's listed formats to the current build,\n" +
+			"installing any that are missing. `forge formats install` is the same\n" +
+			"operation under its reconcile-focused name.",
+		Args: cobra.MaximumNArgs(1),
+		RunE: runFormatsUpdate,
+	}
+}
+
+// formatsInstallCmd is the discoverable name for the reconcile operation that
+// `formats update` already performs (issue #34): install a handler for every
+// format this repo lists that isn't installed yet — exactly what a fresh clone
+// of a repo with a committed .forge/formats needs.
+func formatsInstallCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "install [extension]",
+		Short: "Install handlers for every listed format that is missing",
+		Long: "Installs a handler for every format listed in .forge/formats that has no\n" +
+			"installed handler yet (and refreshes outdated ones). Run it after cloning a\n" +
+			"repo with a committed .forge/formats, or whenever `forge status` reports\n" +
+			"formats with no handler. Alias of `forge formats update`.",
+		Args: cobra.MaximumNArgs(1),
+		RunE: runFormatsUpdate,
 	}
 }
 
