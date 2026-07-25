@@ -76,6 +76,15 @@ func TestCSPHeaderPresent(t *testing.T) {
 	if !strings.Contains(csp, "default-src 'none'") || !strings.Contains(csp, "script-src 'self'") {
 		t.Fatalf("CSP not set as expected: %q", csp)
 	}
+	// GLB-embedded textures are materialized as blob:/data: URLs by the
+	// renderer's loader; both are same-document byte sources, not egress.
+	if !strings.Contains(csp, "img-src 'self' data: blob:") || !strings.Contains(csp, "connect-src 'self' data: blob:") {
+		t.Fatalf("CSP must allow blob:/data: for embedded textures, got: %q", csp)
+	}
+	// The policy must never widen to real network egress.
+	if strings.Contains(csp, "http:") || strings.Contains(csp, "https:") || strings.Contains(csp, "*") {
+		t.Fatalf("CSP unexpectedly permits network sources: %q", csp)
+	}
 }
 
 func TestUnknownPath404(t *testing.T) {
