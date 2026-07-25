@@ -106,9 +106,18 @@ func serveBlob(b []byte) http.HandlerFunc {
 // withCSP blocks any external fetch from the served page: scripts and styles
 // come only from this origin (styles allow inline because renderer bundles
 // inject a <style> element), and no other resource type is permitted.
+//
+// blob: and data: are permitted for images and connect because they are
+// same-document byte sources, not network egress. A renderer receives its
+// file's bytes and may need to hand a decoded region of them to the browser as
+// an image; the standard way is a blob:/data: URL, fetched back by the page
+// itself. Denying those schemes doesn't stop a renderer from reaching the
+// network (nothing here can) — it only makes embedded imagery silently fail to
+// appear. This is a capability of the renderer contract, not an accommodation
+// for any one format. Nothing about it permits bytes leaving the machine.
 func withCSP(next http.Handler) http.Handler {
 	const csp = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
-		"img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'"
+		"img-src 'self' data: blob:; connect-src 'self' data: blob:; base-uri 'none'; form-action 'none'"
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy", csp)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
