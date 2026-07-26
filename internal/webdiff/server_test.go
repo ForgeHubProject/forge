@@ -41,9 +41,9 @@ func TestRoutes(t *testing.T) {
 	h := withCSP(p.handler())
 
 	cases := []struct {
-		path        string
-		wantStatus  int
-		wantCT      string
+		path         string
+		wantStatus   int
+		wantCT       string
 		wantContains string
 	}{
 		{"/", 200, "text/html", "models/robot.glb"},
@@ -84,6 +84,64 @@ func TestCSPHeaderPresent(t *testing.T) {
 	// The policy must never widen to real network egress.
 	if strings.Contains(csp, "http:") || strings.Contains(csp, "https:") || strings.Contains(csp, "*") {
 		t.Fatalf("CSP unexpectedly permits network sources: %q", csp)
+	}
+}
+
+// The page must tell the renderer how big each side actually is. A placeholder
+// size is not a harmless stub: a renderer deciding whether it can afford to hold
+// both versions in memory reads this number, and one that treats a non-positive
+// size as "nothing here" silently drops a side forge is really serving.
+func TestAppJSReportsRealBlobSizes(t *testing.T) {
+	p := newTestPayload(t) // Base "base-bytes" (10), Head "head-bytes" (10)
+	body, _ := io.ReadAll(doGet(t, withCSP(p.handler()), "/app.js").Body)
+	got := string(body)
+
+	for _, want := range []string{
+		`"base":{"url":"/blob/base","size":10}`,
+		`"head":{"url":"/blob/head","size":10}`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("app.js missing %s; got:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, `"size":0`) {
+		t.Errorf("app.js still reports a placeholder size:\n%s", got)
+	}
+}
+
+func TestAppJSSizesMatchServedBytes(t *testing.T) {
+	p := newTestPayload(t)
+	p.Base = make([]byte, 4096)
+	p.Head = make([]byte, 1234)
+	h := withCSP(p.handler())
+
+	body, _ := io.ReadAll(doGet(t, h, "/app.js").Body)
+	if !strings.Contains(string(body), `"size":4096`) || !strings.Contains(string(body), `"size":1234`) {
+		t.Fatalf("declared sizes do not match the payload; got:\n%s", string(body))
+	}
+	// The declared size must equal what the blob route actually serves, or the
+	// renderer budgets against one number and receives another.
+	for path, want := range map[string]int{"/blob/base": 4096, "/blob/head": 1234} {
+		served, _ := io.ReadAll(doGet(t, h, path).Body)
+		if len(served) != want {
+			t.Errorf("%s served %d bytes, declared %d", path, len(served), want)
+		}
+	}
+}
+
+// A side with no bytes is a file this change added or deleted. Reporting it as a
+// zero-length blob would be indistinguishable from a real but empty version, so
+// it is reported as absent instead.
+func TestAppJSReportsMissingSideAsNull(t *testing.T) {
+	p := newTestPayload(t)
+	p.Base = nil
+	body, _ := io.ReadAll(doGet(t, withCSP(p.handler()), "/app.js").Body)
+	got := string(body)
+	if !strings.Contains(got, `"base":null`) {
+		t.Errorf("absent base should be null; got:\n%s", got)
+	}
+	if !strings.Contains(got, `"head":{"url":"/blob/head"`) {
+		t.Errorf("present head should still be described; got:\n%s", got)
 	}
 }
 

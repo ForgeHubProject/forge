@@ -63,7 +63,7 @@ func (p Payload) handler() http.Handler {
 
 	mux.HandleFunc("/app.js", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-		fmt.Fprintf(w, appJS, jsString(mode))
+		fmt.Fprintf(w, appJS, jsString(mode), p.blobsJSON())
 	})
 
 	mux.HandleFunc("/renderer.js", func(w http.ResponseWriter, r *http.Request) {
