@@ -9,6 +9,7 @@ import (
 
 	"github.com/forgehubproject/forge/internal/fhr"
 	"github.com/forgehubproject/forge/internal/forgerepo"
+	"github.com/forgehubproject/forge/internal/handler"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -46,7 +47,7 @@ type capabilities struct {
 // handlerFor answers what is knowable about a path before anything is asked of
 // it, so an agent does not spend a turn discovering that a file has no semantic
 // answer available.
-func (s *server) handlerFor(_ context.Context, _ *mcp.CallToolRequest, in handlerForIn) (*mcp.CallToolResult, handlerForOut, error) {
+func (s *server) handlerFor(ctx context.Context, _ *mcp.CallToolRequest, in handlerForIn) (*mcp.CallToolResult, handlerForOut, error) {
 	var out handlerForOut
 
 	path, err := s.resolve(in.Path)
@@ -59,8 +60,9 @@ func (s *server) handlerFor(_ context.Context, _ *mcp.CallToolRequest, in handle
 	out.Ignored = forgerepo.LoadIgnoredFormats(s.root)[ext]
 
 	// What the semantic tools would really do with this path, which is the
-	// registry's answer and not the manifest's.
-	out.Semantic = handlerID(forgerepo.Registry(s.root), path) != ""
+	// registry's answer and not the manifest's: a repository that lists no
+	// formats filters nothing, so an unlisted extension is answered there.
+	out.Semantic = handlerID(forgerepo.Registry(ctx, s.root), path) != ""
 
 	meta, found := installedFor(ext)
 	if !found {
@@ -85,7 +87,7 @@ func (s *server) handlerFor(_ context.Context, _ *mcp.CallToolRequest, in handle
 		return nil, out, nil
 	}
 
-	info, err := fhr.HandlerInfo(binary)
+	info, err := fhr.HandlerInfo(ctx, binary)
 	if err != nil {
 		out.Note = fmt.Sprintf("handler %q did not answer the protocol's info call (%v); the call is optional, so nothing about its capabilities is known", meta.ID, err)
 		return nil, out, nil
@@ -101,7 +103,16 @@ func (s *server) handlerFor(_ context.Context, _ *mcp.CallToolRequest, in handle
 		out.Capability.SemanticCompare = declared(c.SemanticCompare)
 		out.Capability.SemanticMerge = declared(c.SemanticMerge)
 	}
-	if !out.OptedIn {
+	// The note reports what the registry does, not what the manifest lists: the
+	// two part company in a repository with no opt-in list, and a note saying a
+	// path falls back to text beside a semanticDiffAvailable of true would send an
+	// agent away from an answer forge can give.
+	switch {
+	case out.Semantic && !out.OptedIn:
+		out.Note = fmt.Sprintf("%s is not listed in this repository's .forge/formats, but the repository lists no formats at all — an empty list filters nothing, so this handler is what answers for it", ext)
+	case !out.Semantic && out.Ignored:
+		out.Note = fmt.Sprintf("this repository has deliberately marked %s as having no handler, so the semantic tools leave it to git's text diff", ext)
+	case !out.Semantic:
 		out.Note = fmt.Sprintf("this handler is installed but %s is not listed in this repository's .forge/formats, so the semantic tools fall back to text for it", ext)
 	}
 	return nil, out, nil
@@ -135,35 +146,59 @@ func installedFor(ext string) (fhr.InstalledMeta, bool) {
 }
 
 type formatsOut struct {
-	Root    string        `json:"root"`
-	Formats []formatEntry `json:"formats" jsonschema:"one entry per extension this repository has opted into or ignored"`
-	Note    string        `json:"note,omitempty"`
+	Root      string        `json:"root"`
+	OptInList bool          `json:"optInList" jsonschema:"true when this repository lists formats; false means it lists none, and an empty list filters nothing, so every installed handler answers here"`
+	Formats   []formatEntry `json:"formats" jsonschema:"one entry per extension forge answers about here or has been told not to"`
+	Note      string        `json:"note,omitempty"`
 }
 
 type formatEntry struct {
 	Extension   string `json:"extension"`
-	State       string `json:"state" jsonschema:"\"opted-in\" for an extension forge answers semantically, \"ignored\" for one deliberately left to git"`
+	State       string `json:"state" jsonschema:"\"opted-in\" for an extension this repository lists, \"ignored\" for one it deliberately leaves to git, \"unlisted\" for one an installed handler claims in a repository that lists no formats"`
 	HandlerID   string `json:"handlerId,omitempty" jsonschema:"the installed handler that claims this extension, absent when none does"`
-	Installed   bool   `json:"installed" jsonschema:"false means the extension is listed but inactive: semantic tools fall back to text"`
+	Installed   bool   `json:"installed" jsonschema:"true when the handler binary is present on this machine"`
+	Semantic    bool   `json:"semanticDiffAvailable" jsonschema:"what forge_semantic_diff would actually do with a path of this extension: true for a semantic answer, false for a text fallback"`
 	Build       string `json:"build,omitempty" jsonschema:"build of the installed handler"`
 	PinnedBuild string `json:"pinnedBuild,omitempty" jsonschema:"build this repository pins in .forge/handlers"`
 }
 
-// formats reports the repository's opt-in list and each entry's handler state,
-// including the entries that are listed but inactive — the drift a human has to
-// fix, and which an agent would otherwise read as a missing capability.
-func (s *server) formats(_ context.Context, _ *mcp.CallToolRequest, _ noArgs) (*mcp.CallToolResult, formatsOut, error) {
+// formats reports what forge can be asked about here: the repository's opt-in
+// list and each entry's handler state, including the entries that are listed but
+// inactive — the drift a human has to fix, and which an agent would otherwise
+// read as a missing capability.
+//
+// A repository that lists nothing is the common case — forge init writes no
+// format list — and it is not a repository forge can answer nothing about: an
+// empty opt-in list filters nothing, so every installed handler answers, and the
+// extensions they claim are what this tool reports.
+func (s *server) formats(ctx context.Context, _ *mcp.CallToolRequest, _ noArgs) (*mcp.CallToolResult, formatsOut, error) {
 	out := formatsOut{Root: s.root, Formats: []formatEntry{}}
+	reg := forgerepo.Registry(ctx, s.root)
 
 	states := map[string]string{}
-	for ext := range forgerepo.LoadForgeFormats(s.root) {
+	included := forgerepo.LoadForgeFormats(s.root)
+	for ext := range included {
 		states[ext] = "opted-in"
 	}
 	for ext := range forgerepo.LoadIgnoredFormats(s.root) {
 		states[ext] = "ignored"
 	}
+	out.OptInList = len(included) > 0
+
+	if !out.OptInList {
+		for _, meta := range fhr.LoadInstalledHandlers() {
+			for _, f := range meta.Formats {
+				if ext := strings.ToLower(f); states[ext] == "" {
+					states[ext] = "unlisted"
+				}
+			}
+		}
+		out.Note = "this repository lists no formats, so the opt-in list filters nothing: every installed handler answers here, and the extensions below are the ones they claim. " +
+			"Listing the formats this repository cares about is a terminal command."
+	}
 	if len(states) == 0 {
-		out.Note = "this repository lists no formats, so every path falls back to git's text diff. Adding one is a terminal command."
+		out.Note = "this repository lists no formats and no handler is installed on this machine, so every path falls back to git's text diff. " +
+			"Installing a handler is a terminal command."
 		return nil, out, nil
 	}
 
@@ -175,7 +210,7 @@ func (s *server) formats(_ context.Context, _ *mcp.CallToolRequest, _ noArgs) (*
 
 	pins := forgerepo.LoadForgeHandlers(s.root)
 	for _, ext := range exts {
-		entry := formatEntry{Extension: ext, State: states[ext]}
+		entry := formatEntry{Extension: ext, State: states[ext], Semantic: semanticFor(reg, ext)}
 		if meta, found := installedFor(ext); found {
 			entry.HandlerID = meta.ID
 			entry.Build = meta.Build
@@ -187,6 +222,13 @@ func (s *server) formats(_ context.Context, _ *mcp.CallToolRequest, _ noArgs) (*
 		out.Formats = append(out.Formats, entry)
 	}
 	return nil, out, nil
+}
+
+// semanticFor answers for an extension what forge_handler_for answers for a
+// path, through the same registry resolution, so the two tools cannot disagree
+// about whether forge has a semantic answer.
+func semanticFor(reg *handler.Registry, ext string) bool {
+	return ext != "" && handlerID(reg, "a"+ext) != ""
 }
 
 type sourceListOut struct {

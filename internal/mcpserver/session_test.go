@@ -3,8 +3,11 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -179,13 +182,97 @@ func TestSessionAnswersTheReadOnlyToolsOverTheWire(t *testing.T) {
 
 	var formats formatsOut
 	call(t, session, "forge_formats", map[string]any{}, &formats)
-	if len(formats.Formats) == 0 {
-		t.Fatal("formats returned nothing for a repository that lists three")
+	if !formats.OptInList || len(formats.Formats) == 0 {
+		t.Fatalf("formats returned nothing for a repository that lists four: %+v", formats)
 	}
 
 	var sources sourceListOut
 	call(t, session, "forge_source_list", map[string]any{}, &sources)
 	if sources.Mutable || len(sources.Sources) != 1 {
 		t.Fatalf("source_list = %+v", sources)
+	}
+}
+
+// A server is not a command: the SDK dispatches every request on its own
+// goroutine, so several tool calls are in flight at once from the first client
+// that asks two questions. Every tool is exercised that way here, against the
+// legacy root-level layout — the one whose per-repo files carry package state —
+// so anything shared unsafely between calls has a chance to show under -race.
+// The deterministic version of that check is in internal/forgerepo, where the
+// state can be put back to the one moment its window is open.
+func TestSessionAnswersConcurrentCalls(t *testing.T) {
+	session := connect(t, newServerLegacyLayout(t).root)
+	ctx := context.Background()
+
+	calls := []struct {
+		name string
+		args map[string]any
+	}{
+		{"forge_status", map[string]any{}},
+		{"forge_formats", map[string]any{}},
+		{"forge_handler_for", map[string]any{"path": "asset.unit"}},
+		{"forge_semantic_diff", map[string]any{"path": "asset.unit"}},
+		{"forge_show", map[string]any{"ref": "HEAD"}},
+		{"forge_source_list", map[string]any{}},
+	}
+
+	// Released together, so the calls reach the shared state at the same moment
+	// rather than one after another.
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for range 8 {
+		for _, c := range calls {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: c.name, Arguments: c.args})
+				switch {
+				case err != nil:
+					t.Errorf("%s: %v", c.name, err)
+				case res.IsError:
+					t.Errorf("%s returned a tool error: %s", c.name, resultText(res))
+				}
+			}()
+		}
+	}
+	close(start)
+	wg.Wait()
+}
+
+// A client that gives up on a call must be able to make that stick: the request
+// is abandoned and the handler it started is killed, rather than the session
+// holding a goroutine and a subprocess nobody is waiting for.
+func TestSessionCancellationReachesTheHandler(t *testing.T) {
+	s := newServer(t)
+
+	pidFile := filepath.Join(t.TempDir(), "handler.pid")
+	t.Setenv("FORGE_TEST_HANG_PID", pidFile)
+	plugins := filepath.Join(os.Getenv("HOME"), ".forge", "plugins")
+	writeFileT(t, filepath.Join(plugins, "forge-handler-unit-hang"), hangHandlerScript, 0755)
+	writeFileT(t, filepath.Join(plugins, "forge-handler-unit-hang.json"),
+		`{"id":"unit-hang","build":"nobuild","source":"https://example.invalid/manifest.toml","formats":[".hang"]}`, 0644)
+	writeFileT(t, filepath.Join(s.root, ".forge", "formats"), ".unit\n.silent\n.wide\n.hang\n!.ignored\n", 0644)
+	writeFileT(t, filepath.Join(s.root, "stuck.hang"), "x", 0644)
+
+	session := connect(t, s.root)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_, _ = session.CallTool(ctx, &mcp.CallToolParams{
+			Name:      "forge_semantic_diff",
+			Arguments: map[string]any{"path": "stuck.hang"},
+		})
+	}()
+
+	pid := waitForHandlerPID(t, pidFile)
+	cancel()
+	waitForHandlerGone(t, pid)
+
+	// The session is still answering: one abandoned call is not a broken server.
+	var status statusOut
+	call(t, session, "forge_status", map[string]any{}, &status)
+	if status.Root != s.root {
+		t.Fatalf("status after a cancelled call = %+v", status)
 	}
 }

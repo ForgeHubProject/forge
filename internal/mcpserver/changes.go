@@ -34,7 +34,7 @@ type diffSummary struct {
 	Total            int            `json:"total" jsonschema:"changes in the tree this response describes, counted at every depth"`
 	ByKind           map[string]int `json:"byKind" jsonschema:"how many of those changes were additions, removals and modifications"`
 	TopLevel         []topLevel     `json:"topLevel" jsonschema:"the roots of the tree, each with the number of children under it"`
-	TopLevelWithheld int            `json:"topLevelWithheld,omitempty" jsonschema:"roots the list above omits, if any; raise max_changes or narrow with kinds to reach them"`
+	TopLevelWithheld int            `json:"topLevelWithheld,omitempty" jsonschema:"roots the list above omits, if any; page past the last one returned with \"after\", narrow with kinds, or raise max_changes"`
 }
 
 // topLevel is one root of a change tree, named so a caller can drill into it.
@@ -72,6 +72,24 @@ func qualify(parent, path string) string {
 	default:
 		return parent + "." + path
 	}
+}
+
+// siblingsAfter returns the changes that follow one fully-qualified path among
+// its own siblings — the page "after" asks for, and the only way to reach a level
+// the cap cut short: "at" descends into a change and so can never address the
+// ones beside it. The level's own qualified path comes back too, since it is what
+// the remaining paths are qualified against.
+func siblingsAfter(changes []handler.DiffChange, parent, after string) (rest []handler.DiffChange, level string, found bool) {
+	for i, c := range changes {
+		q := qualify(parent, c.Path)
+		if q == after {
+			return changes[i+1:], parent, true
+		}
+		if rest, level, found = siblingsAfter(c.Children, q, after); found {
+			return rest, level, true
+		}
+	}
+	return nil, "", false
 }
 
 // subtreeAt returns the changes at one fully-qualified path — the drill-down
@@ -170,8 +188,9 @@ func flatten(changes []handler.DiffChange, parent string, depth int, budget *int
 }
 
 // summarize describes a whole tree, capping the list of roots at the same budget
-// the tree itself gets and saying how many roots that left out.
-func summarize(changes []handler.DiffChange, max int) diffSummary {
+// the tree itself gets and saying how many roots that left out. parent is the
+// level the tree hangs under — what "after" resumed at — and "" for a whole file.
+func summarize(changes []handler.DiffChange, parent string, max int) diffSummary {
 	// TopLevel is built empty rather than left nil: it is a required property of
 	// the tool's output schema, and a nil slice would cross the wire as null.
 	s := diffSummary{Total: countChanges(changes), ByKind: countByKind(changes), TopLevel: []topLevel{}}
@@ -181,7 +200,7 @@ func summarize(changes []handler.DiffChange, max int) diffSummary {
 			break
 		}
 		s.TopLevel = append(s.TopLevel, topLevel{
-			Path:       qualify("", c.Path),
+			Path:       qualify(parent, c.Path),
 			Label:      c.Label,
 			Kind:       string(c.Kind),
 			ChildCount: len(c.Children),
@@ -191,46 +210,56 @@ func summarize(changes []handler.DiffChange, max int) diffSummary {
 }
 
 // renderTree turns a filtered tree into the capped node sequence and the
-// truncation record that describes it.
-func renderTree(changes []handler.DiffChange, max int) ([]changeNode, truncation) {
+// truncation record that describes it. parent is the level the tree hangs under,
+// so a page resumed with "after" keeps every path fully qualified.
+func renderTree(changes []handler.DiffChange, parent string, max int) ([]changeNode, truncation) {
 	total := countChanges(changes)
 	budget := max
 	var nodes []changeNode
-	flatten(changes, "", 0, &budget, &nodes)
-	return nodes, truncationOf(nodes, len(nodes), total)
+	roots := flatten(changes, parent, 0, &budget, &nodes)
+	return nodes, truncationOf(nodes, len(nodes), total, roots < len(changes))
 }
 
-// truncationOf builds the truncation record for a rendered tree, naming the
-// paths that drill into what was withheld.
-func truncationOf(nodes []changeNode, returned, total int) truncation {
+// truncationOf builds the truncation record for a rendered tree, naming both
+// cursors that reach what was withheld: "at" for a subtree that was cut, and
+// "after" for the rest of this level. Advice alone was the gap — a caller told
+// only to raise the cap has no move left but to ask for the whole tree, which is
+// what the cap exists to prevent.
+func truncationOf(nodes []changeNode, returned, total int, moreAtLevel bool) truncation {
 	t := truncation{Truncated: returned < total, Returned: returned, Total: total}
 	if !t.Truncated {
 		return t
 	}
 
 	var deeper []string
+	level := ""
 	for _, n := range nodes {
+		if n.Depth == 0 {
+			level = n.Path
+		}
 		if n.ChildrenReturned < n.ChildCount {
 			deeper = append(deeper, n.Path)
 		}
 	}
-	switch {
-	case len(deeper) == 0:
-		t.Hint = fmt.Sprintf("%d of %d changes returned; the rest are further roots — raise max_changes, or narrow with kinds.", returned, total)
-	default:
+
+	t.Hint = fmt.Sprintf("%d of %d changes returned.", returned, total)
+	if len(deeper) > 0 {
 		listed := deeper
 		more := 0
 		if len(listed) > hintPathLimit {
 			more = len(listed) - hintPathLimit
 			listed = listed[:hintPathLimit]
 		}
-		t.Hint = fmt.Sprintf("%d of %d changes returned; these paths hold changes this response withheld: %s",
-			returned, total, strings.Join(listed, ", "))
+		t.Hint += fmt.Sprintf(" These paths hold changes this response withheld: %s", strings.Join(listed, ", "))
 		if more > 0 {
 			t.Hint += fmt.Sprintf(" (and %d more)", more)
 		}
-		t.Hint += ". Call again with at=<one of those paths>, narrow with kinds, or raise max_changes."
+		t.Hint += " — call again with at=<one of them>."
 	}
+	if moreAtLevel && level != "" {
+		t.Hint += fmt.Sprintf(" More changes follow at this level: call again with after=%q for the next page of them.", level)
+	}
+	t.Hint += " kinds narrows what is counted; max_changes raises the cap."
 	return t
 }
 

@@ -1,6 +1,7 @@
 package forgerepo
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -18,7 +19,15 @@ import (
 // handler whose formats the repo has opted into, with the text catch-all last.
 // The root is passed in rather than resolved here, so a caller that must not
 // change directory can serve a repository other than the process's own.
-func Registry(repoDir string) *handler.Registry {
+//
+// ctx bounds every subprocess the returned handlers spawn, so a caller that can
+// be cancelled — one request of a long-lived server — does not leave a handler
+// running behind it. Build the registry per request to get that.
+//
+// A repository that lists no formats at all gets every installed handler: the
+// opt-in list is a filter, and an empty filter excludes nothing. Anything
+// reporting on what forge can answer here has to read it the same way.
+func Registry(ctx context.Context, repoDir string) *handler.Registry {
 	reg := handler.NewRegistry()
 
 	forgeFormats := LoadForgeFormats(repoDir)
@@ -41,7 +50,7 @@ func Registry(repoDir string) *handler.Registry {
 				continue
 			}
 		}
-		reg.Register(fhr.NewSubprocessHandler(binary, meta))
+		reg.Register(fhr.NewSubprocessHandler(ctx, binary, meta))
 	}
 
 	reg.Register(text.New())

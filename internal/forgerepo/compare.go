@@ -6,6 +6,7 @@
 package forgerepo
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -55,8 +56,12 @@ func (s Source) String() string { return s.Name }
 
 // GitOutput runs git inside the repository and returns its stdout. A failure
 // carries git's own message, so callers can report why git refused.
-func GitOutput(repoDir string, args ...string) ([]byte, error) {
-	c := exec.Command("git", args...)
+//
+// ctx bounds the process: a caller whose own context is cancelled — a request of
+// a long-lived server, abandoned by its client — takes git down with it instead
+// of leaving it to finish work nobody will read.
+func GitOutput(ctx context.Context, repoDir string, args ...string) ([]byte, error) {
+	c := exec.CommandContext(ctx, "git", args...)
 	c.Dir = repoDir
 	out, err := c.Output()
 	var exitErr *exec.ExitError
@@ -73,8 +78,8 @@ func GitOutput(repoDir string, args ...string) ([]byte, error) {
 // ResolveRev resolves a revision to the commit it names, the way git resolves it
 // (object id, branch, tag, HEAD~2, ...). A revision git will not resolve is
 // reported by name.
-func ResolveRev(repoDir, rev string) (string, error) {
-	out, err := GitOutput(repoDir, "rev-parse", "--verify", "--quiet", rev+"^{commit}")
+func ResolveRev(ctx context.Context, repoDir, rev string) (string, error) {
+	out, err := GitOutput(ctx, repoDir, "rev-parse", "--verify", "--quiet", rev+"^{commit}")
 	commit := strings.TrimSpace(string(out))
 	if err != nil || commit == "" {
 		return "", fmt.Errorf("not a valid revision: %s", rev)
@@ -82,8 +87,8 @@ func ResolveRev(repoDir, rev string) (string, error) {
 	return commit, nil
 }
 
-func IsRevision(repoDir, rev string) bool {
-	_, err := ResolveRev(repoDir, rev)
+func IsRevision(ctx context.Context, repoDir, rev string) bool {
+	_, err := ResolveRev(ctx, repoDir, rev)
 	return err == nil
 }
 
@@ -110,7 +115,7 @@ func pathExists(p string) bool {
 // success. Once the paths have begun — after "--", or after a path — a path no
 // side holds is kept and reported absent instead, except for one that resolves
 // as a revision: only "--" can say a revision's name was meant as a path.
-func SplitRevsAndPaths(repoDir string, args []string, dashAt int) (revs, paths []string, err error) {
+func SplitRevsAndPaths(ctx context.Context, repoDir string, args []string, dashAt int) (revs, paths []string, err error) {
 	if dashAt >= 0 && dashAt <= len(args) {
 		return args[:dashAt], args[dashAt:], nil
 	}
@@ -121,7 +126,7 @@ func SplitRevsAndPaths(repoDir string, args []string, dashAt int) (revs, paths [
 			// refuses it too, and reading it as a path would compare only the
 			// arguments before it — a pair the caller did not ask for, reported at
 			// exit zero alongside a line calling a revision forge resolved missing.
-			if !pathExists(arg) && IsRevision(repoDir, arg) {
+			if !pathExists(arg) && IsRevision(ctx, repoDir, arg) {
 				return nil, nil, fmt.Errorf("revisions must come before paths: %s came after %s\n"+
 					"if %s is a path, the working tree does not have it — put it after \"--\"", arg, paths[0], arg)
 			}
@@ -135,7 +140,7 @@ func SplitRevsAndPaths(repoDir string, args []string, dashAt int) (revs, paths [
 			// first two that nobody asked for. Anything else begins the paths — a
 			// name on disk, with no ambiguity left for "--" to settle, and a name
 			// no side holds, kept for the caller to report absent.
-			if pathExists(arg) || !IsRevision(repoDir, arg) {
+			if pathExists(arg) || !IsRevision(ctx, repoDir, arg) {
 				paths = append(paths, arg)
 				continue
 			}
@@ -143,7 +148,7 @@ func SplitRevsAndPaths(repoDir string, args []string, dashAt int) (revs, paths [
 			continue
 		}
 		switch {
-		case IsRevision(repoDir, arg):
+		case IsRevision(ctx, repoDir, arg):
 			if pathExists(arg) {
 				return nil, nil, fmt.Errorf("ambiguous argument %q: both a revision and a file\n"+
 					"use \"--\" to separate paths from revisions, like: forge diff <revision> -- %s", arg, arg)
@@ -163,7 +168,7 @@ func SplitRevsAndPaths(repoDir string, args []string, dashAt int) (revs, paths [
 // what `forge diff a b` means, as it does in git; dashAt moves with the extra
 // argument. Anything else — a three-dot range, a file whose name contains ".."
 // — is left for the ordinary rules.
-func ExpandRevRange(repoDir string, args []string, dashAt int) ([]string, int) {
+func ExpandRevRange(ctx context.Context, repoDir string, args []string, dashAt int) ([]string, int) {
 	if len(args) == 0 || dashAt == 0 {
 		return args, dashAt
 	}
@@ -172,7 +177,7 @@ func ExpandRevRange(repoDir string, args []string, dashAt int) ([]string, int) {
 		return args, dashAt
 	}
 	base, head, found := strings.Cut(arg, "..")
-	if !found || base == "" || head == "" || !IsRevision(repoDir, base) || !IsRevision(repoDir, head) {
+	if !found || base == "" || head == "" || !IsRevision(ctx, repoDir, base) || !IsRevision(ctx, repoDir, head) {
 		return args, dashAt
 	}
 	if dashAt > 0 {
@@ -190,10 +195,10 @@ func ExpandRevRange(repoDir string, args []string, dashAt int) ([]string, int) {
 // only the first two would report a comparison the caller did not ask for while
 // exiting zero — indistinguishable, to anything reading the status, from the
 // comparison that was asked for.
-func DiffSources(repoDir string, revs []string) (base, head Source, err error) {
+func DiffSources(ctx context.Context, repoDir string, revs []string) (base, head Source, err error) {
 	switch len(revs) {
 	case 0:
-		commit, headErr := ResolveRev(repoDir, "HEAD")
+		commit, headErr := ResolveRev(ctx, repoDir, "HEAD")
 		if headErr != nil {
 			// A repository with no commits has nothing to compare against, so
 			// the whole working tree reads as newly added.
@@ -201,17 +206,17 @@ func DiffSources(repoDir string, revs []string) (base, head Source, err error) {
 		}
 		return RevisionSource("HEAD", commit), WorktreeSource(), nil
 	case 1:
-		commit, err := ResolveRev(repoDir, revs[0])
+		commit, err := ResolveRev(ctx, repoDir, revs[0])
 		if err != nil {
 			return base, head, err
 		}
 		return RevisionSource(revs[0], commit), WorktreeSource(), nil
 	case 2:
-		baseCommit, err := ResolveRev(repoDir, revs[0])
+		baseCommit, err := ResolveRev(ctx, repoDir, revs[0])
 		if err != nil {
 			return base, head, err
 		}
-		headCommit, err := ResolveRev(repoDir, revs[1])
+		headCommit, err := ResolveRev(ctx, repoDir, revs[1])
 		if err != nil {
 			return base, head, err
 		}
@@ -262,7 +267,7 @@ func RelPaths(repoDir string, args []string) ([]string, error) {
 
 // SourceEntry reports what a source holds at path — "blob", "tree", "commit"
 // (the gitlink a submodule is recorded as), or "" when it holds nothing there.
-func SourceEntry(repoDir string, src Source, path string) string {
+func SourceEntry(ctx context.Context, repoDir string, src Source, path string) string {
 	if path == "." {
 		return "tree" // the repository root itself
 	}
@@ -283,7 +288,7 @@ func SourceEntry(repoDir string, src Source, path string) string {
 		// and not this repository's, so `git cat-file -t` cannot report it and the
 		// entry would read as absent. ":(literal)" keeps a name containing
 		// pathspec wildcards from matching some other entry.
-		out, err := GitOutput(repoDir, "ls-tree", "-z", src.Rev, "--", ":(literal)"+path)
+		out, err := GitOutput(ctx, repoDir, "ls-tree", "-z", src.Rev, "--", ":(literal)"+path)
 		if err != nil {
 			return ""
 		}
@@ -304,7 +309,7 @@ func SourceEntry(repoDir string, src Source, path string) string {
 // there at all. entry is what SourceEntry reported, since only a blob has bytes.
 // Revision blobs come from git itself — `git show <rev>:<path>`, the mechanism
 // the merge path already uses to read index stages.
-func blobAt(repoDir string, src Source, path, entry string) ([]byte, bool, error) {
+func blobAt(ctx context.Context, repoDir string, src Source, path, entry string) ([]byte, bool, error) {
 	if entry != "blob" {
 		return nil, false, nil
 	}
@@ -315,7 +320,7 @@ func blobAt(repoDir string, src Source, path, entry string) ([]byte, bool, error
 		}
 		return data, true, nil
 	}
-	data, err := GitOutput(repoDir, "show", src.Rev+":"+path)
+	data, err := GitOutput(ctx, repoDir, "show", src.Rev+":"+path)
 	if err != nil {
 		return nil, false, fmt.Errorf("reading %s at %s: %w", path, src.Name, err)
 	}
@@ -348,15 +353,15 @@ type FileComparison struct {
 // absent. A path neither source holds at all is not an error: both Found flags
 // come back false and the caller says so for that one file instead of abandoning
 // the rest.
-func CompareFile(repoDir string, reg *handler.Registry, path string, base, head Source) (FileComparison, error) {
+func CompareFile(ctx context.Context, repoDir string, reg *handler.Registry, path string, base, head Source) (FileComparison, error) {
 	h, err := reg.Resolve(path)
 	if err != nil {
 		return FileComparison{}, err
 	}
 	fc := FileComparison{Path: path, HandlerID: HandlerFormat(h), Semantic: IsBinaryHandler(h)}
 
-	baseEntry := SourceEntry(repoDir, base, path)
-	headEntry := SourceEntry(repoDir, head, path)
+	baseEntry := SourceEntry(ctx, repoDir, base, path)
+	headEntry := SourceEntry(ctx, repoDir, head, path)
 	fc.BaseFound, fc.HeadFound = baseEntry != "", headEntry != ""
 	if (fc.BaseFound && baseEntry != "blob") || (fc.HeadFound && headEntry != "blob") {
 		fc.Semantic = false
@@ -365,11 +370,11 @@ func CompareFile(repoDir string, reg *handler.Registry, path string, base, head 
 		return fc, nil
 	}
 
-	fc.Base, fc.BaseFound, err = blobAt(repoDir, base, path, baseEntry)
+	fc.Base, fc.BaseFound, err = blobAt(ctx, repoDir, base, path, baseEntry)
 	if err != nil {
 		return fc, err
 	}
-	fc.Head, fc.HeadFound, err = blobAt(repoDir, head, path, headEntry)
+	fc.Head, fc.HeadFound, err = blobAt(ctx, repoDir, head, path, headEntry)
 	if err != nil {
 		return fc, err
 	}
@@ -425,8 +430,8 @@ func GitDiffArgs(base, head Source, flags, pathspecs []string) []string {
 // ChangedPaths lists the files that differ between two sources, restricted to
 // the given pathspecs. --name-only reports one path per changed file, and
 // GitDiffArgs leaves renames undetected, so every record is a file to compare.
-func ChangedPaths(repoDir string, base, head Source, pathspecs []string) ([]string, error) {
-	out, err := GitOutput(repoDir, GitDiffArgs(base, head, []string{"--name-only", "-z"}, pathspecs)...)
+func ChangedPaths(ctx context.Context, repoDir string, base, head Source, pathspecs []string) ([]string, error) {
+	out, err := GitOutput(ctx, repoDir, GitDiffArgs(base, head, []string{"--name-only", "-z"}, pathspecs)...)
 	if err != nil {
 		return nil, err
 	}
@@ -443,14 +448,14 @@ func ChangedPaths(repoDir string, base, head Source, pathspecs []string) ([]stri
 // itself, and a directory expands to the files that changed under it. An
 // argument neither source holds is kept, so it is reported as absent rather
 // than silently dropped.
-func ComparePaths(repoDir string, base, head Source, paths []string) ([]string, error) {
+func ComparePaths(ctx context.Context, repoDir string, base, head Source, paths []string) ([]string, error) {
 	var out []string
 	for _, p := range paths {
-		if SourceEntry(repoDir, base, p) != "tree" && SourceEntry(repoDir, head, p) != "tree" {
+		if SourceEntry(ctx, repoDir, base, p) != "tree" && SourceEntry(ctx, repoDir, head, p) != "tree" {
 			out = append(out, p)
 			continue
 		}
-		under, err := ChangedPaths(repoDir, base, head, []string{p})
+		under, err := ChangedPaths(ctx, repoDir, base, head, []string{p})
 		if err != nil {
 			return nil, err
 		}
@@ -460,8 +465,8 @@ func ComparePaths(repoDir string, base, head Source, paths []string) ([]string, 
 }
 
 // TextChangeSummary reports what git counts for a path no handler claims.
-func TextChangeSummary(repoDir string, base, head Source, path string) string {
-	out, err := GitOutput(repoDir, GitDiffArgs(base, head, []string{"--numstat"}, []string{path})...)
+func TextChangeSummary(ctx context.Context, repoDir string, base, head Source, path string) string {
+	out, err := GitOutput(ctx, repoDir, GitDiffArgs(base, head, []string{"--numstat"}, []string{path})...)
 	if err != nil {
 		return "changed"
 	}
