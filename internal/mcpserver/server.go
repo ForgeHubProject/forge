@@ -64,9 +64,12 @@ Three rules govern every tool here.
 
   Truncation is always explicit. A capped response carries truncated, returned,
   total and a hint naming the cursors that reach what it withheld: "at" for a
-  subtree that was cut, "after" for the rest of a level. Both take a path from
-  the response being read, so a capped response is never a dead end. A response
-  that does not say it was truncated was not truncated.
+  subtree that was cut, "after" for the rest of every level the cap cut short.
+  Both take a path from the response being read, so a capped response is never a
+  dead end, and a cursor that would return the response naming it is never named.
+  Where a tool does not have those parameters, the hint names the tool that does
+  and the call that reaches the same content there. A response that does not say
+  it was truncated was not truncated.
 
 Trust boundary. Handlers are native executables resolved from the source list,
 and that list is managed by a human at a terminal — deliberately, because
@@ -208,8 +211,12 @@ returns for a file with a handler, git's line counts for a file without one.
 The comparison is the commit against its first parent, or against nothing for a
 root commit. Pass path to narrow to a single file and get its change tree, capped
 at max_changes with the same explicit truncation; pass after with a path from a
-previous response to continue a file list the cap cut short. For any other pair of
-revisions, use forge_semantic_diff with base and head.`,
+previous response to continue a file list the cap cut short — after here is a file
+in the listing, not a change path, and this tool has no "at" at all: a change tree
+is paged in forge_semantic_diff, which every capped tree here names the call for.
+max_changes is the whole response's cap and not each file's, so the files listed
+share the roots their summaries may name. For any other pair of revisions, use
+forge_semantic_diff with base and head.`,
 	}, bounded(s, s.show))
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -228,8 +235,10 @@ Reports honestly rather than guessing: a handler that declares no capabilities i
 reported as having declared none, a handler that does not answer the info call is
 reported as silent, and a path no handler claims is reported as one the semantic
 tools will fall back to text for. semanticDiffAvailable is what forge_semantic_diff
-would really do with the path: in a repository that lists no formats an empty
-opt-in list filters nothing, so an unlisted extension is still answered.`,
+would really do with the path: in a repository that opts no format in an empty
+opt-in list filters nothing, so an unlisted extension is still answered, while an
+extension the repository lists as ignored is not — an ignore is a decision, and it
+holds whether or not anything else is opted in.`,
 	}, bounded(s, s.handlerFor))
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -244,10 +253,11 @@ Answers "what can forge be asked about here" before any path is named. An
 extension listed with no installed handler is inactive — semantic tools fall
 back to text for it until a human installs one.
 
-A repository that lists no formats has not opted out of everything, and optInList
+A repository that opts no format in has not opted out of everything, and optInList
 comes back false to say so: an empty opt-in list filters nothing, so every
 installed handler answers here and the extensions they claim are listed as
-"unlisted".
+"unlisted". An extension listed as ignored is the exception — an ignore is a
+decision, so it holds whether or not anything else is opted in.
 
 Changes nothing: adding, ignoring, or installing a format is a terminal command.`,
 	}, bounded(s, s.formats))
@@ -306,6 +316,12 @@ func readOnly(title string) *mcp.ToolAnnotations {
 // Paths arrive from an agent, so resolution is against the bound root and never
 // the process's working directory, and one that climbs out of the root is
 // refused rather than read.
+//
+// The name climbing out is only half of it: a path can leave the root without
+// ever looking like it, through a directory link the repository itself contains.
+// That is repository content steering a read rather than an argument doing it,
+// and it is exactly the crossing an agent reviewing untrusted content must not be
+// talked into, so the directories on the way are followed and checked too.
 func (s *server) resolve(p string) (string, error) {
 	if strings.TrimSpace(p) == "" {
 		return "", errors.New("path is required")
@@ -316,18 +332,54 @@ func (s *server) resolve(p string) (string, error) {
 	}
 	abs = filepath.Clean(abs)
 
+	roots := s.roots()
+	rel, inside := relInside(roots, abs)
+	if !inside {
+		return "", fmt.Errorf("%s is outside the repository this server serves", p)
+	}
+	// The last component is deliberately left unfollowed: a link there is content
+	// git records as content, and forgerepo compares it as the path it names.
+	dir := filepath.Dir(abs)
+	for {
+		resolved, err := filepath.EvalSymlinks(dir)
+		if err == nil {
+			if _, ok := relInside(roots, resolved); !ok {
+				return "", fmt.Errorf("%s leads outside the repository this server serves through a link, so it is not read", p)
+			}
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			// Nothing on the way exists, so nothing was followed.
+			break
+		}
+		dir = parent
+	}
+	return rel, nil
+}
+
+// roots are the forms of the bound root a contained path may be relative to: the
+// root as it was given, and the root with its own links resolved — a repository
+// under a linked directory is still the repository this server serves.
+func (s *server) roots() []string {
 	roots := []string{s.root}
 	if resolved, err := filepath.EvalSymlinks(s.root); err == nil && resolved != s.root {
 		roots = append(roots, resolved)
 	}
+	return roots
+}
+
+// relInside reports an absolute path relative to whichever root contains it,
+// slash-separated, and whether any of them did.
+func relInside(roots []string, abs string) (string, bool) {
 	for _, root := range roots {
 		rel, err := filepath.Rel(root, abs)
 		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			continue
 		}
-		return filepath.ToSlash(rel), nil
+		return filepath.ToSlash(rel), true
 	}
-	return "", fmt.Errorf("%s is outside the repository this server serves", p)
+	return "", false
 }
 
 // noArgs is the input of a tool that takes none.

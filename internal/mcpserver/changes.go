@@ -34,7 +34,7 @@ type diffSummary struct {
 	Total            int            `json:"total" jsonschema:"changes in the tree this response describes, counted at every depth"`
 	ByKind           map[string]int `json:"byKind" jsonschema:"how many of those changes were additions, removals and modifications"`
 	TopLevel         []topLevel     `json:"topLevel" jsonschema:"the roots of the tree, each with the number of children under it"`
-	TopLevelWithheld int            `json:"topLevelWithheld,omitempty" jsonschema:"roots the list above omits, if any; page past the last one returned with \"after\", narrow with kinds, or raise max_changes"`
+	TopLevelWithheld int            `json:"topLevelWithheld,omitempty" jsonschema:"roots the list above omits, if any; the truncation hint of the response carrying this summary names how to reach them"`
 }
 
 // topLevel is one root of a change tree, named so a caller can drill into it.
@@ -209,58 +209,128 @@ func summarize(changes []handler.DiffChange, parent string, max int) diffSummary
 	return s
 }
 
-// renderTree turns a filtered tree into the capped node sequence and the
-// truncation record that describes it. parent is the level the tree hangs under,
-// so a page resumed with "after" keeps every path fully qualified.
-func renderTree(changes []handler.DiffChange, parent string, max int) ([]changeNode, truncation) {
+// cursors are the paths that reach what a capped response withheld: the subtrees
+// "at" still narrows, and the last change returned at each level the cap cut
+// short, which is what "after" continues from.
+//
+// The rendered sequence's own first change is never offered as an "at". Drilling
+// into it re-renders this very response under the same cap — the same bytes back,
+// with the level below it no closer — so naming it hands a caller a cursor whose
+// only effect is to spend a turn.
+type cursors struct {
+	deeper []string
+	after  []levelCursor
+}
+
+// levelCursor is one level the cap cut short: the change to pass as "after", and
+// the change whose children that level is ("" for the rendered sequence's own
+// top level).
+type levelCursor struct {
+	last  string
+	under string
+}
+
+// cursorsOf reads a rendered sequence for the moves that make progress through
+// it. moreAtLevel says whether the top level held roots this sequence did not
+// reach, which the sequence itself cannot show: a root that was never emitted
+// leaves no node behind to count.
+func cursorsOf(nodes []changeNode, moreAtLevel bool) cursors {
+	var c cursors
+	last := map[string]string{}
+	for _, n := range nodes {
+		last[n.Parent] = n.Path
+	}
+	for i, n := range nodes {
+		if n.ChildrenReturned >= n.ChildCount {
+			continue
+		}
+		if i > 0 {
+			c.deeper = append(c.deeper, n.Path)
+		}
+		if n.ChildrenReturned > 0 {
+			c.after = append(c.after, levelCursor{last: last[n.Path], under: n.Path})
+		}
+	}
+	// Deepest first: a depth-first walk finishes the level it stopped inside
+	// before it comes back up to the one above.
+	for i, j := 0, len(c.after)-1; i < j; i, j = i+1, j-1 {
+		c.after[i], c.after[j] = c.after[j], c.after[i]
+	}
+	if moreAtLevel && len(nodes) > 0 {
+		c.after = append(c.after, levelCursor{last: last[nodes[0].Parent]})
+	}
+	return c
+}
+
+// afterCalls renders each cut level as the "after" call that continues it,
+// deepest first — the order a caller walking the tree needs them in.
+func (c cursors) afterCalls() []string {
+	out := make([]string, 0, len(c.after))
+	for _, lc := range c.after {
+		if len(out) == hintPathLimit {
+			break
+		}
+		if lc.under == "" {
+			out = append(out, fmt.Sprintf("after=%q for the rest of this response's own level", lc.last))
+			continue
+		}
+		out = append(out, fmt.Sprintf("after=%q for the rest of what is under %s", lc.last, lc.under))
+	}
+	return out
+}
+
+// atPaths names the subtrees still worth drilling into, at most hintPathLimit of
+// them: the hint exists to give a caller its next move, not to become the payload
+// it was meant to avoid. more is how many it left unnamed.
+func (c cursors) atPaths() (listed string, more int) {
+	paths := c.deeper
+	if len(paths) > hintPathLimit {
+		more = len(paths) - hintPathLimit
+		paths = paths[:hintPathLimit]
+	}
+	return strings.Join(paths, ", "), more
+}
+
+// renderTree turns a filtered tree into the capped node sequence, the truncation
+// record that describes it, and the cursors that reach the rest. parent is the
+// level the tree hangs under, so a page resumed with "after" keeps every path
+// fully qualified. The cursors come back separately because a tool whose own
+// parameters are not "at" and "after" — forge_show — has to say what it withheld
+// in its own vocabulary rather than in this one.
+func renderTree(changes []handler.DiffChange, parent string, max int) ([]changeNode, truncation, cursors) {
 	total := countChanges(changes)
 	budget := max
 	var nodes []changeNode
 	roots := flatten(changes, parent, 0, &budget, &nodes)
-	return nodes, truncationOf(nodes, len(nodes), total, roots < len(changes))
+	t, c := truncationOf(nodes, len(nodes), total, roots < len(changes))
+	return nodes, t, c
 }
 
 // truncationOf builds the truncation record for a rendered tree, naming both
 // cursors that reach what was withheld: "at" for a subtree that was cut, and
-// "after" for the rest of this level. Advice alone was the gap — a caller told
-// only to raise the cap has no move left but to ask for the whole tree, which is
-// what the cap exists to prevent.
-func truncationOf(nodes []changeNode, returned, total int, moreAtLevel bool) truncation {
+// "after" for the rest of each level the cap cut short. Advice alone was the gap
+// — a caller told only to raise the cap has no move left but to ask for the whole
+// tree, which is what the cap exists to prevent.
+func truncationOf(nodes []changeNode, returned, total int, moreAtLevel bool) (truncation, cursors) {
 	t := truncation{Truncated: returned < total, Returned: returned, Total: total}
 	if !t.Truncated {
-		return t
+		return t, cursors{}
 	}
-
-	var deeper []string
-	level := ""
-	for _, n := range nodes {
-		if n.Depth == 0 {
-			level = n.Path
-		}
-		if n.ChildrenReturned < n.ChildCount {
-			deeper = append(deeper, n.Path)
-		}
-	}
+	c := cursorsOf(nodes, moreAtLevel)
 
 	t.Hint = fmt.Sprintf("%d of %d changes returned.", returned, total)
-	if len(deeper) > 0 {
-		listed := deeper
-		more := 0
-		if len(listed) > hintPathLimit {
-			more = len(listed) - hintPathLimit
-			listed = listed[:hintPathLimit]
-		}
-		t.Hint += fmt.Sprintf(" These paths hold changes this response withheld: %s", strings.Join(listed, ", "))
+	if listed, more := c.atPaths(); listed != "" {
+		t.Hint += fmt.Sprintf(" These paths hold changes this response withheld: %s", listed)
 		if more > 0 {
 			t.Hint += fmt.Sprintf(" (and %d more)", more)
 		}
 		t.Hint += " — call again with at=<one of them>."
 	}
-	if moreAtLevel && level != "" {
-		t.Hint += fmt.Sprintf(" More changes follow at this level: call again with after=%q for the next page of them.", level)
+	if calls := c.afterCalls(); len(calls) > 0 {
+		t.Hint += " Levels the cap cut short, deepest first: call again with " + strings.Join(calls, ", then ") + "."
 	}
 	t.Hint += " kinds narrows what is counted; max_changes raises the cap."
-	return t
+	return t, c
 }
 
 // capOf reads the caller's max_changes, treating anything at or below zero as

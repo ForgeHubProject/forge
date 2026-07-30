@@ -12,9 +12,9 @@ import (
 
 type showIn struct {
 	Ref        string `json:"ref" jsonschema:"the commit to show — anything git resolves (sha, branch, tag, HEAD~2)"`
-	Path       string `json:"path,omitempty" jsonschema:"narrow to one file and return its change tree, not just its summary"`
+	Path       string `json:"path,omitempty" jsonschema:"narrow to one file and return its change tree, not just its summary; a directory narrows the listing but returns no tree, since one tree per file under it is the response the cap exists to prevent"`
 	After      string `json:"after,omitempty" jsonschema:"a path from a previous response's files — the listing resumes after it, which is how a commit that changed more files than the cap is walked"`
-	MaxChanges int    `json:"max_changes,omitempty" jsonschema:"most files to list, and most changes to return for a named path; defaults to 200"`
+	MaxChanges int    `json:"max_changes,omitempty" jsonschema:"the whole response's cap, not each file's: most files to list, most changes to return for a named path, and the roots the listed files share between them; defaults to 200"`
 }
 
 type showOut struct {
@@ -114,8 +114,21 @@ func (s *server) show(ctx context.Context, _ *mcp.CallToolRequest, in showIn) (*
 		return nil, out, nil
 	}
 
+	// max_changes is the whole response's cap, not each file's. Capping every file
+	// on its own multiplies the cap by the file list — two hundred files each
+	// naming two hundred roots is exactly the response the cap exists to prevent,
+	// and the file list not being cut would report it as complete — so the roots a
+	// summary may name are the cap divided among the files being listed. A file
+	// whose share cannot hold its roots still reports how many it has, and its note
+	// names the call that returns them.
+	perFile := max / len(files)
+	if perFile < 1 {
+		perFile = 1
+	}
+
 	reg := forgerepo.Registry(ctx, s.root)
 	out.Files = make([]showFile, 0, len(files))
+	shared := false
 	for _, path := range files {
 		entry := showFile{Path: path}
 		fc, err := forgerepo.CompareFile(ctx, s.root, reg, path, base, head)
@@ -133,10 +146,17 @@ func (s *server) show(ctx context.Context, _ *mcp.CallToolRequest, in showIn) (*
 			id := fc.HandlerID
 			entry.HandlerID = &id
 			entry.HandlerBuild = fhr.InstalledHandlerBuild(id)
-			summary := summarize(fc.Diff.Changes, "", max)
+			summary := summarize(fc.Diff.Changes, "", perFile)
 			entry.Summary = &summary
-			if len(paths) == 1 {
-				nodes, t := renderTree(fc.Diff.Changes, "", max)
+			shared = shared || summary.TopLevelWithheld > 0
+			// The tree comes back for the file the call named, and only for it: a
+			// directory is a valid pathspec, and one whole tree per file under it is
+			// the same multiplication in another shape.
+			if len(paths) == 1 && path == paths[0] {
+				nodes, t, c := renderTree(fc.Diff.Changes, "", max)
+				if t.Truncated {
+					t.Hint = showTreeHint(t, c, base, head, path)
+				}
 				entry.Changes, entry.Truncated = nodes, &t
 			} else if summary.Total > 0 {
 				entry.Note = nextStep(base, head, path)
@@ -144,7 +164,33 @@ func (s *server) show(ctx context.Context, _ *mcp.CallToolRequest, in showIn) (*
 		}
 		out.Files = append(out.Files, entry)
 	}
+	if shared && out.Note == "" {
+		out.Note = fmt.Sprintf("summary.topLevel is capped across this whole response, not per file: the %d files listed share max_changes=%d, so a file's topLevelWithheld is what its share could not name. Each such file's note names the call that returns its own tree.",
+			len(files), max)
+	}
 	return nil, out, nil
+}
+
+// showTreeHint says what a capped change tree withheld in forge_show's own
+// vocabulary. The tree's cursors are not forge_show's: this tool has no "at" at
+// all, and its "after" names a file in the listing, so handing those back would
+// give a caller one instruction the schema rejects and one that is silently read
+// as a file path. The hint names the tool the cursors belong to, and the call
+// that reaches this file there.
+func showTreeHint(t truncation, c cursors, base, head forgerepo.Source, path string) string {
+	h := fmt.Sprintf("%d of %d changes in this file returned. forge_show has no cursor into a change tree — call %s to page it",
+		t.Returned, t.Total, semanticDiffCall(base, head, path))
+	if listed, more := c.atPaths(); listed != "" {
+		h += fmt.Sprintf(", passing at=<one of the paths this response withheld: %s", listed)
+		if more > 0 {
+			h += fmt.Sprintf(", and %d more", more)
+		}
+		h += ">"
+	}
+	if calls := c.afterCalls(); len(calls) > 0 {
+		h += ", or " + strings.Join(calls, ", then ")
+	}
+	return h + ". max_changes raises the cap here too."
 }
 
 // filesAfter returns the changed files that follow one path in the listing — the
@@ -158,15 +204,21 @@ func filesAfter(files []string, after string) ([]string, bool) {
 	return nil, false
 }
 
-// nextStep names the forge_semantic_diff call that returns one file's change tree
+// semanticDiffCall names the forge_semantic_diff call that answers for one file
 // in this comparison. A root commit's base side is nothing, and nothing is not a
 // revision: naming it as one would hand the caller an instruction that can only
 // fail, so that comparison is named the way forge_semantic_diff accepts it.
-func nextStep(base, head forgerepo.Source, path string) string {
+func semanticDiffCall(base, head forgerepo.Source, path string) string {
 	if base.Kind == forgerepo.SourceEmpty {
-		return fmt.Sprintf("call forge_semantic_diff with base_empty=true head=%q path=%q for this file's change tree", head.Name, path)
+		return fmt.Sprintf("forge_semantic_diff with base_empty=true head=%q path=%q", head.Name, path)
 	}
-	return fmt.Sprintf("call forge_semantic_diff with base=%q head=%q path=%q for this file's change tree", base.Name, head.Name, path)
+	return fmt.Sprintf("forge_semantic_diff with base=%q head=%q path=%q", base.Name, head.Name, path)
+}
+
+// nextStep is that call, offered to a file this response summarised but did not
+// open.
+func nextStep(base, head forgerepo.Source, path string) string {
+	return "call " + semanticDiffCall(base, head, path) + " for this file's change tree"
 }
 
 // commitInfo reads the commit's own header from git, one record, so the fields

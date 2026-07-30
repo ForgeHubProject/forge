@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -94,6 +95,70 @@ diff)
 esac
 `
 
+// deepRoots and deepKids shape deepHandlerScript's tree: every root holds more
+// children than a paging test's cap, and every root's first child holds that many
+// grandchildren again — the shape where a response's own root is the only thing
+// cut, so a hint written from depth 0 alone can only name that root back.
+const deepRoots, deepKids = 3, 10
+
+// deepHandlerScript is a handler for ".deep" reporting that tree. It reaches the
+// handler through the environment, since the protocol's diff call carries only
+// blobs.
+const deepHandlerScript = `#!/bin/sh
+case "$1" in
+diff)
+  cat >/dev/null
+  printf '{"version":"1.0","format":"unit-deep","changes":['
+  r=0
+  while [ "$r" -lt "$FORGE_TEST_DEEP_ROOTS" ]; do
+    if [ "$r" -gt 0 ]; then printf ','; fi
+    printf '{"path":"root%d","kind":"modified","children":[' "$r"
+    k=0
+    while [ "$k" -lt "$FORGE_TEST_DEEP_KIDS" ]; do
+      if [ "$k" -gt 0 ]; then printf ','; fi
+      printf '{"path":"root%d/c%d","kind":"modified"' "$r" "$k"
+      if [ "$k" -eq 0 ]; then
+        printf ',"children":['
+        g=0
+        while [ "$g" -lt "$FORGE_TEST_DEEP_KIDS" ]; do
+          if [ "$g" -gt 0 ]; then printf ','; fi
+          printf '{"path":"root%d/c0/g%d","kind":"modified"}' "$r" "$g"
+          g=$((g + 1))
+        done
+        printf ']'
+      fi
+      printf '}'
+      k=$((k + 1))
+    done
+    printf ']}'
+    r=$((r + 1))
+  done
+  printf ']}\n'
+  ;;
+*)
+  echo "unimplemented" >&2
+  exit 1
+  ;;
+esac
+`
+
+// echoHandlerScript is a handler for ".echo" that reports the head blob it was
+// handed, verbatim and still base64-encoded, as the one change — so a test can
+// assert which bytes forge really read for a path rather than only that it read
+// something.
+const echoHandlerScript = `#!/bin/sh
+case "$1" in
+diff)
+  blob=$(sed 's/.*"head":"\([^"]*\)".*/\1/')
+  printf '{"version":"1.0","format":"unit-echo","changes":[{"path":"content","kind":"modified","after":"%s"}]}\n' "$blob"
+  ;;
+*)
+  echo "unimplemented" >&2
+  exit 1
+  ;;
+esac
+`
+
 // hangHandlerScript is a handler that never answers. It records its own pid and
 // then becomes the sleep — exec, so the pid the test watches is the process forge
 // spawned — which is how a test can tell whether a cancelled call took its
@@ -148,6 +213,8 @@ func newRepo(t *testing.T) string {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("FORGE_TEST_WIDE_ROOTS", strconv.Itoa(wideRoots))
+	t.Setenv("FORGE_TEST_DEEP_ROOTS", strconv.Itoa(deepRoots))
+	t.Setenv("FORGE_TEST_DEEP_KIDS", strconv.Itoa(deepKids))
 	plugins := filepath.Join(home, ".forge", "plugins")
 	writeFileT(t, filepath.Join(plugins, "forge-handler-unit-stub"), stubHandlerScript, 0755)
 	writeFileT(t, filepath.Join(plugins, "forge-handler-unit-stub.json"),
@@ -158,6 +225,12 @@ func newRepo(t *testing.T) string {
 	writeFileT(t, filepath.Join(plugins, "forge-handler-unit-wide"), wideHandlerScript, 0755)
 	writeFileT(t, filepath.Join(plugins, "forge-handler-unit-wide.json"),
 		`{"id":"unit-wide","build":"nobuild","source":"https://example.invalid/manifest.toml","formats":[".wide"]}`, 0644)
+	writeFileT(t, filepath.Join(plugins, "forge-handler-unit-deep"), deepHandlerScript, 0755)
+	writeFileT(t, filepath.Join(plugins, "forge-handler-unit-deep.json"),
+		`{"id":"unit-deep","build":"nobuild","source":"https://example.invalid/manifest.toml","formats":[".deep"]}`, 0644)
+	writeFileT(t, filepath.Join(plugins, "forge-handler-unit-echo"), echoHandlerScript, 0755)
+	writeFileT(t, filepath.Join(plugins, "forge-handler-unit-echo.json"),
+		`{"id":"unit-echo","build":"nobuild","source":"https://example.invalid/manifest.toml","formats":[".echo"]}`, 0644)
 	writeFileT(t, filepath.Join(home, ".forge", "sources.list"),
 		"official\thttps://example.invalid/manifest.toml\n", 0644)
 
@@ -166,11 +239,12 @@ func newRepo(t *testing.T) string {
 	gitT(t, root, "config", "user.email", "t@example.com")
 	gitT(t, root, "config", "user.name", "t")
 
-	writeFileT(t, filepath.Join(root, ".forge", "formats"), ".unit\n.silent\n.wide\n!.ignored\n", 0644)
+	writeFileT(t, filepath.Join(root, ".forge", "formats"), ".unit\n.silent\n.wide\n.deep\n.echo\n!.ignored\n", 0644)
 	writeFileT(t, filepath.Join(root, ".forge", "handlers"), `{"unit-stub":"`+stubBuild+`"}`, 0644)
 	writeFileT(t, filepath.Join(root, "asset.unit"), "v1", 0644)
 	writeFileT(t, filepath.Join(root, "quiet.silent"), "x", 0644)
 	writeFileT(t, filepath.Join(root, "level.wide"), "x", 0644)
+	writeFileT(t, filepath.Join(root, "nested.deep"), "x", 0644)
 	writeFileT(t, filepath.Join(root, "notes.txt"), "line1\n", 0644)
 	gitT(t, root, "add", "-A")
 	gitT(t, root, "commit", "-m", "one")
@@ -303,10 +377,14 @@ func TestSemanticDiffTruncationIsExplicit(t *testing.T) {
 	if len(out.Changes) != 1 {
 		t.Fatalf("expected one change, got %d", len(out.Changes))
 	}
-	// The one node returned is a root whose children were withheld, so the hint
-	// must name it as the path that drills deeper.
-	if !strings.Contains(out.Truncated.Hint, "groupA") || !strings.Contains(out.Truncated.Hint, "at=") {
-		t.Fatalf("hint must name the drill-down path: %q", out.Truncated.Hint)
+	// The one node returned is the root whose children were withheld, and drilling
+	// into it under this same cap returns this very response — so the hint names
+	// the cursor that moves instead of the one that stays put.
+	if !strings.Contains(out.Truncated.Hint, `after="groupA"`) {
+		t.Fatalf("hint must name a cursor that makes progress: %q", out.Truncated.Hint)
+	}
+	if strings.Contains(out.Truncated.Hint, "at=") {
+		t.Fatalf("the only drill-down here is into this response's own root: %q", out.Truncated.Hint)
 	}
 	if out.Changes[0].ChildCount != 2 || out.Changes[0].ChildrenReturned != 0 {
 		t.Fatalf("a cut subtree must say so on the node: %+v", out.Changes[0])
@@ -977,4 +1055,364 @@ func waitForHandlerGone(t *testing.T, pid int) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("handler %d outlived the call that started it", pid)
+}
+
+// pathsOf renders a response's change paths so two responses can be compared for
+// having moved at all.
+func pathsOf(nodes []changeNode) string {
+	var out []string
+	for _, n := range nodes {
+		out = append(out, n.Path)
+	}
+	return strings.Join(out, ",")
+}
+
+// atPathsIn and afterPathsIn pull the cursors a hint names back out of it, so a
+// test follows what a caller would follow rather than asserting on a sentence.
+func atPathsIn(hint string) []string {
+	_, rest, ok := strings.Cut(hint, "withheld: ")
+	if !ok {
+		return nil
+	}
+	listed, _, _ := strings.Cut(rest, " — call again with")
+	listed, _, _ = strings.Cut(listed, " (and ")
+	return strings.Split(listed, ", ")
+}
+
+func afterPathsIn(hint string) []string {
+	var out []string
+	for rest := hint; ; {
+		_, tail, ok := strings.Cut(rest, `after="`)
+		if !ok {
+			return out
+		}
+		path, remainder, ok := strings.Cut(tail, `"`)
+		if !ok {
+			return out
+		}
+		out, rest = append(out, path), remainder
+	}
+}
+
+// A hint is the caller's next move, so every cursor in one has to be a move. The
+// case that breaks is a response whose own root is the only thing the cap cut:
+// read at depth 0 alone, the only path with children left over is that root, and
+// naming it hands back the response the caller is already holding.
+func TestSemanticDiffHintsNameOnlyCursorsThatMove(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+	const perPage = 4
+
+	for _, in := range []semanticDiffIn{
+		{Path: "nested.deep", MaxChanges: perPage},
+		{Path: "nested.deep", At: "root0", MaxChanges: perPage},
+		{Path: "nested.deep", At: "root0/c0", MaxChanges: perPage},
+	} {
+		_, out, err := s.semanticDiff(ctx, nil, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !out.Truncated.Truncated {
+			t.Fatalf("%+v should not fit under a cap of %d: %+v", in, perPage, out.Truncated)
+		}
+		here := pathsOf(out.Changes)
+
+		moves := 0
+		for _, at := range atPathsIn(out.Truncated.Hint) {
+			next := in
+			next.At, next.After = at, ""
+			_, drilled, err := s.semanticDiff(ctx, nil, next)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pathsOf(drilled.Changes) == here {
+				t.Fatalf("at=%q returns the very response that named it: %q", at, out.Truncated.Hint)
+			}
+			moves++
+		}
+		for _, after := range afterPathsIn(out.Truncated.Hint) {
+			next := in
+			next.After = after
+			_, paged, err := s.semanticDiff(ctx, nil, next)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(paged.Changes) == 0 || pathsOf(paged.Changes) == here {
+				t.Fatalf("after=%q reaches nothing this response did not carry: %q", after, out.Truncated.Hint)
+			}
+			moves++
+		}
+		if moves == 0 {
+			t.Fatalf("a capped response must name at least one cursor: %q", out.Truncated.Hint)
+		}
+	}
+}
+
+// The cut level is the one the caller has to be able to finish, and it is not
+// always the top one. A response that stopped inside a level has to say so, or
+// the changes below the point it stopped are unreachable from anything it
+// returned — a cap that hides rather than defers.
+func TestFollowingTheHintsReachesEveryChange(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+	const perPage = 4
+
+	type step struct{ at, after string }
+	seen, walked := map[string]bool{}, map[step]bool{}
+	queue := []step{{}}
+	for calls := 0; len(queue) > 0; calls++ {
+		if calls > deepRoots*deepKids*deepKids {
+			t.Fatal("paging did not terminate")
+		}
+		next := queue[0]
+		queue = queue[1:]
+		if walked[next] {
+			continue
+		}
+		walked[next] = true
+
+		_, out, err := s.semanticDiff(ctx, nil, semanticDiffIn{Path: "nested.deep", At: next.at, After: next.after, MaxChanges: perPage})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range out.Changes {
+			seen[c.Path] = true
+		}
+		if !out.Truncated.Truncated {
+			continue
+		}
+		for _, after := range afterPathsIn(out.Truncated.Hint) {
+			queue = append(queue, step{at: next.at, after: after})
+		}
+		for _, at := range atPathsIn(out.Truncated.Hint) {
+			queue = append(queue, step{at: at})
+		}
+	}
+
+	want := deepRoots * (1 + deepKids + deepKids)
+	if len(seen) != want {
+		t.Fatalf("following only the cursors the hints name reached %d of %d changes", len(seen), want)
+	}
+}
+
+// forge_show renders a named file's change tree with the same machinery
+// forge_semantic_diff uses, but not with the same parameters: forge_show has no
+// "at" at all, and its "after" names a file in the listing. A hint written in the
+// other tool's vocabulary hands the caller one instruction the schema rejects and
+// one that is silently read as something else.
+func TestShowsTreeHintNamesTheToolItsCursorsBelongTo(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+
+	_, out, err := s.show(ctx, nil, showIn{Ref: "HEAD", Path: "asset.unit", MaxChanges: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Files) != 1 || out.Files[0].Truncated == nil || !out.Files[0].Truncated.Truncated {
+		t.Fatalf("expected one file with a capped tree: %+v", out.Files)
+	}
+	hint := out.Files[0].Truncated.Hint
+	if strings.Contains(hint, "call again with") {
+		t.Fatalf("forge_show is not the tool these cursors belong to: %q", hint)
+	}
+	for _, want := range []string{"forge_semantic_diff", `base="HEAD^"`, `head="HEAD"`, `path="asset.unit"`} {
+		if !strings.Contains(hint, want) {
+			t.Fatalf("the hint must name the call that pages this tree, missing %s: %q", want, hint)
+		}
+	}
+
+	// The cursors the hint names, followed against the tool it named them for.
+	cursors := afterPathsIn(hint)
+	if len(cursors) == 0 {
+		t.Fatalf("a capped tree must name a cursor: %q", hint)
+	}
+	_, paged, err := s.semanticDiff(ctx, nil, semanticDiffIn{Path: "asset.unit", Base: "HEAD^", Head: "HEAD", After: cursors[0], MaxChanges: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paged.Changes) == 0 {
+		t.Fatalf("after=%q reached nothing: %+v", cursors[0], paged)
+	}
+
+	// A root commit has no revision to name as its base, and the hint has to say
+	// so the way forge_semantic_diff accepts it.
+	_, root, err := s.show(ctx, nil, showIn{Ref: "HEAD~1", Path: "asset.unit", MaxChanges: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h := root.Files[0].Truncated.Hint; !strings.Contains(h, "base_empty=true") || strings.Contains(h, `base="nothing"`) {
+		t.Fatalf("no revision is called nothing, so no call can pass it: %q", h)
+	}
+}
+
+// forge_show's cap is the response's, not each file's. A commit's file list
+// multiplied by a per-file tree is the response the cap exists to prevent, and
+// the file list not being cut would report that response as complete.
+func TestShowBoundsTheWholeResponseNotEachFile(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+	const files, max = 6, 6
+
+	for i := 0; i < files; i++ {
+		writeFileT(t, filepath.Join(s.root, "many", fmt.Sprintf("f%02d.wide", i)), "x", 0644)
+	}
+	gitT(t, s.root, "add", "many")
+	gitT(t, s.root, "commit", "-m", "many")
+
+	for _, in := range []showIn{{Ref: "HEAD", MaxChanges: max}, {Ref: "HEAD", Path: "many", MaxChanges: max}} {
+		_, out, err := s.show(ctx, nil, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(out.Files) != files {
+			t.Fatalf("%+v listed %d files, want %d", in, len(out.Files), files)
+		}
+		nodes := 0
+		for _, f := range out.Files {
+			if f.Summary == nil {
+				t.Fatalf("a handled file must carry its summary: %+v", f)
+			}
+			if len(f.Changes) != 0 {
+				t.Fatalf("%+v named no single file, so no file gets a tree: %+v", in, f)
+			}
+			if f.Summary.Total != wideRoots || f.Summary.TopLevelWithheld != wideRoots-len(f.Summary.TopLevel) {
+				t.Fatalf("a capped summary must still report what it holds: %+v", f.Summary)
+			}
+			if !strings.Contains(f.Note, "forge_semantic_diff") {
+				t.Fatalf("a file whose roots were withheld must name where they are: %q", f.Note)
+			}
+			nodes += len(f.Summary.TopLevel)
+		}
+		if nodes > max {
+			t.Fatalf("%+v returned %d changes for max_changes=%d", in, nodes, max)
+		}
+		if !strings.Contains(out.Note, "capped across this whole response") {
+			t.Fatalf("a response whose files shared the cap must say so: %q", out.Note)
+		}
+	}
+
+	// A call that really does name one file still gets that file's tree.
+	_, one, err := s.show(ctx, nil, showIn{Ref: "HEAD", Path: "many/f00.wide", MaxChanges: max})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(one.Files) != 1 || len(one.Files[0].Changes) != max {
+		t.Fatalf("a named file is the one case a tree is returned for: %+v", one.Files)
+	}
+}
+
+// A .forge/formats holding nothing but ignore lines opts nothing in, but it has
+// not said nothing: the extensions it names are the ones it refused. The
+// empty-opt-in-list rule must not hand those to a handler, and no report may call
+// the repository silent while listing them.
+func TestAnIgnoreOnlyFormatListIsHonouredAndReportedAsItself(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+	writeFileT(t, filepath.Join(s.root, ".forge", "formats"), "!.unit\n", 0644)
+
+	_, diff, err := s.semanticDiff(ctx, nil, semanticDiffIn{Path: "asset.unit"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff.HandlerID != nil || diff.Fallback != "text" {
+		t.Fatalf("an extension this repository ignored must be left to git: %+v", diff)
+	}
+
+	_, formats, err := s.formats(ctx, nil, noArgs{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if formats.OptInList {
+		t.Fatalf("an ignore opts nothing in: %+v", formats)
+	}
+	if strings.Contains(formats.Note, "lists no formats") {
+		t.Fatalf("this repository lists an extension — as ignored: %q", formats.Note)
+	}
+	var unit formatEntry
+	for _, f := range formats.Formats {
+		if f.Extension == ".unit" {
+			unit = f
+		}
+	}
+	if unit.State != "ignored" || unit.Semantic {
+		t.Fatalf("an ignored extension is not semantically answerable: %+v", unit)
+	}
+
+	_, h, err := s.handlerFor(ctx, nil, handlerForIn{Path: "asset.unit"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !h.Ignored || h.OptedIn || h.Semantic {
+		t.Fatalf("handler state must match what the diff did: %+v", h)
+	}
+	if strings.Contains(h.Note, "lists no formats at all") {
+		t.Fatalf("the note contradicts the ignored it is attached to: %q", h.Note)
+	}
+	if !strings.Contains(h.Note, "deliberately") {
+		t.Fatalf("an ignore is a decision and should be reported as one: %q", h.Note)
+	}
+}
+
+// A path can leave the root without ever looking like it, through a directory
+// link the repository itself holds. That is repository content steering a read
+// rather than an argument doing it — the crossing this surface exists to refuse.
+func TestAPathThroughALinkedDirectoryIsRefused(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+
+	outside := t.TempDir()
+	writeFileT(t, filepath.Join(outside, "secret.unit"), "SECRET", 0644)
+	if err := os.Symlink(outside, filepath.Join(s.root, "elsewhere")); err != nil {
+		t.Fatal(err)
+	}
+
+	const through = "elsewhere/secret.unit"
+	if _, _, err := s.semanticDiff(ctx, nil, semanticDiffIn{Path: through}); err == nil {
+		t.Error("forge_semantic_diff read through a linked directory")
+	}
+	if _, _, err := s.handlerFor(ctx, nil, handlerForIn{Path: through}); err == nil {
+		t.Error("forge_handler_for accepted a path through a linked directory")
+	}
+	if _, _, err := s.show(ctx, nil, showIn{Ref: "HEAD", Path: through}); err == nil {
+		t.Error("forge_show accepted a path through a linked directory")
+	}
+
+	// The link itself is a path in the repository and stays answerable: it is
+	// compared as the name it holds, which is what git recorded for it.
+	if _, _, err := s.semanticDiff(ctx, nil, semanticDiffIn{Path: "elsewhere"}); err != nil {
+		t.Errorf("the link itself is inside the repository: %v", err)
+	}
+}
+
+// A link committed in the repository is content, not a window onto whatever it
+// names. Reading through one lets the repository under review choose the bytes an
+// agent is shown, and leaves the two sides of the comparison disagreeing about
+// what the file even is.
+func TestACommittedLinkIsComparedAsTheNameItHolds(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+
+	outside := filepath.Join(t.TempDir(), "outside.echo")
+	writeFileT(t, outside, "SECRET", 0644)
+	if err := os.Symlink(outside, filepath.Join(s.root, "link.echo")); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, s.root, "add", "link.echo")
+	gitT(t, s.root, "commit", "-m", "link")
+
+	_, out, err := s.semanticDiff(ctx, nil, semanticDiffIn{Path: "link.echo", Base: "HEAD"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Changes) != 1 {
+		t.Fatalf("the echo handler reports the blob it was handed: %+v", out.Changes)
+	}
+	after, _ := out.Changes[0].After.(string)
+	if after != base64.StdEncoding.EncodeToString([]byte(outside)) {
+		got, _ := base64.StdEncoding.DecodeString(after)
+		t.Fatalf("a link is compared as the name it holds, got %q", got)
+	}
+	if strings.Contains(after, base64.StdEncoding.EncodeToString([]byte("SECRET"))) {
+		t.Fatal("the comparison read a file outside the repository")
+	}
 }
