@@ -232,8 +232,8 @@ func repoRelPaths(repoDir string, args []string) ([]string, error) {
 
 // ── reading and comparing one file ──────────────────────────────────────────────────────────────────
 
-// sourceEntry reports what a source holds at path — "blob", "tree", or "" when
-// it holds nothing there.
+// sourceEntry reports what a source holds at path — "blob", "tree", "commit"
+// (the gitlink a submodule is recorded as), or "" when it holds nothing there.
 func sourceEntry(repoDir string, src blobSource, path string) string {
 	if path == "." {
 		return "tree" // the repository root itself
@@ -250,20 +250,34 @@ func sourceEntry(repoDir string, src blobSource, path string) string {
 			return "blob"
 		}
 	case sourceRevision:
-		out, err := gitOutput(repoDir, "cat-file", "-t", src.rev+":"+path)
+		// The type is read out of the tree entry, which is the only place a
+		// gitlink's is: the commit it names lives in the submodule's object store
+		// and not this repository's, so `git cat-file -t` cannot report it and the
+		// entry would read as absent. ":(literal)" keeps a name containing
+		// pathspec wildcards from matching some other entry.
+		out, err := gitOutput(repoDir, "ls-tree", "-z", src.rev, "--", ":(literal)"+path)
 		if err != nil {
 			return ""
 		}
-		return strings.TrimSpace(string(out))
+		// <mode> SP <type> SP <object> TAB <name>, one NUL-terminated record.
+		record, _, _ := strings.Cut(string(out), "\x00")
+		meta, _, ok := strings.Cut(record, "\t")
+		if !ok {
+			return ""
+		}
+		if fields := strings.Fields(meta); len(fields) >= 2 {
+			return fields[1]
+		}
 	}
 	return ""
 }
 
-// blobAt returns path's bytes at one source and whether that source holds the
-// path at all. Revision blobs come from git itself — `git show <rev>:<path>`,
-// the mechanism the merge path already uses to read index stages.
-func blobAt(repoDir string, src blobSource, path string) ([]byte, bool, error) {
-	if sourceEntry(repoDir, src, path) != "blob" {
+// blobAt returns path's bytes at one source and whether that source holds a blob
+// there at all. entry is what sourceEntry reported, since only a blob has bytes.
+// Revision blobs come from git itself — `git show <rev>:<path>`, the mechanism
+// the merge path already uses to read index stages.
+func blobAt(repoDir string, src blobSource, path, entry string) ([]byte, bool, error) {
+	if entry != "blob" {
 		return nil, false, nil
 	}
 	if src.kind == sourceWorktree {
@@ -300,9 +314,12 @@ type fileComparison struct {
 //
 // A path no format handler claims is reported with Semantic false and its bytes
 // left unread: every caller renders those through git's own text diff, so
-// reading a large file only to discard the read would be waste. A path neither
-// source holds is not an error — both Found flags come back false and the caller
-// says so for that one file instead of abandoning the rest.
+// reading a large file only to discard the read would be waste. A path a side
+// holds as something other than a blob — a submodule's gitlink — has no bytes for
+// a handler to read either, so it takes that same route rather than being called
+// absent. A path neither source holds at all is not an error: both Found flags
+// come back false and the caller says so for that one file instead of abandoning
+// the rest.
 func compareFile(repoDir string, reg *handler.Registry, path string, base, head blobSource) (fileComparison, error) {
 	h, err := reg.Resolve(path)
 	if err != nil {
@@ -310,22 +327,23 @@ func compareFile(repoDir string, reg *handler.Registry, path string, base, head 
 	}
 	fc := fileComparison{Path: path, HandlerID: handlerFormat(h), Semantic: isBinaryHandler(h)}
 
-	if !fc.Semantic {
-		fc.BaseFound = sourceEntry(repoDir, base, path) == "blob"
-		fc.HeadFound = sourceEntry(repoDir, head, path) == "blob"
+	baseEntry := sourceEntry(repoDir, base, path)
+	headEntry := sourceEntry(repoDir, head, path)
+	fc.BaseFound, fc.HeadFound = baseEntry != "", headEntry != ""
+	if (fc.BaseFound && baseEntry != "blob") || (fc.HeadFound && headEntry != "blob") {
+		fc.Semantic = false
+	}
+	if !fc.Semantic || (!fc.BaseFound && !fc.HeadFound) {
 		return fc, nil
 	}
 
-	fc.Base, fc.BaseFound, err = blobAt(repoDir, base, path)
+	fc.Base, fc.BaseFound, err = blobAt(repoDir, base, path, baseEntry)
 	if err != nil {
 		return fc, err
 	}
-	fc.Head, fc.HeadFound, err = blobAt(repoDir, head, path)
+	fc.Head, fc.HeadFound, err = blobAt(repoDir, head, path, headEntry)
 	if err != nil {
 		return fc, err
-	}
-	if !fc.BaseFound && !fc.HeadFound {
-		return fc, nil
 	}
 	// An absent side is an empty blob: the handler then reports the file as
 	// wholly added or wholly removed, which is what it means.
