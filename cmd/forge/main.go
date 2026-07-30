@@ -1067,7 +1067,7 @@ git's own text diff for the rest.
   forge diff <base> <head>    revision to revision
 
 Paths may follow the revisions. Use "--" when an argument is both a revision
-and a filename.`,
+and a filename, and to name a path the working tree does not have.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: runDiff,
 	}
