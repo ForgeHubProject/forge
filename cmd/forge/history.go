@@ -103,15 +103,27 @@ func pathExists(p string) bool {
 // resolves nor a file on disk is refused by name, as git refuses it: a mistyped
 // revision is indistinguishable from a file that is not there, and reading it as
 // a path would compare something other than what was asked for while reporting
-// success. Once the paths have begun — after "--", after a path, or after the
-// second revision — a path no side holds is kept and reported absent instead.
+// success. Once the paths have begun — after "--", or after a path — a path no
+// side holds is kept and reported absent instead, except for one that resolves
+// as a revision: only "--" can say a revision's name was meant as a path.
 func splitRevsAndPaths(repoDir string, args []string, dashAt int) (revs, paths []string, err error) {
 	if dashAt >= 0 && dashAt <= len(args) {
 		return args[:dashAt], args[dashAt:], nil
 	}
-	i := 0
-	for ; i < len(args); i++ {
-		arg := args[i]
+	for _, arg := range args {
+		if len(paths) > 0 {
+			// Past the first path an argument that resolves as a revision and is
+			// not on disk is refused rather than kept as an absent path: git
+			// refuses it too, and reading it as a path would compare only the
+			// arguments before it — a pair the caller did not ask for, reported at
+			// exit zero alongside a line calling a revision forge resolved missing.
+			if !pathExists(arg) && isRevision(repoDir, arg) {
+				return nil, nil, fmt.Errorf("revisions must come before paths: %s came after %s\n"+
+					"if %s is a path, the working tree does not have it — put it after \"--\"", arg, paths[0], arg)
+			}
+			paths = append(paths, arg)
+			continue
+		}
 		if len(revs) >= 2 {
 			// Past the second revision the only argument worth telling apart is a
 			// further revision: it is collected, so the command's own arity refuses
@@ -120,7 +132,8 @@ func splitRevsAndPaths(repoDir string, args []string, dashAt int) (revs, paths [
 			// name on disk, with no ambiguity left for "--" to settle, and a name
 			// no side holds, kept for the caller to report absent.
 			if pathExists(arg) || !isRevision(repoDir, arg) {
-				return revs, args[i:], nil
+				paths = append(paths, arg)
+				continue
 			}
 			revs = append(revs, arg)
 			continue
@@ -133,13 +146,13 @@ func splitRevsAndPaths(repoDir string, args []string, dashAt int) (revs, paths [
 			}
 			revs = append(revs, arg)
 		case pathExists(arg):
-			return revs, args[i:], nil
+			paths = append(paths, arg)
 		default:
 			return nil, nil, fmt.Errorf("not a valid revision: %s\n"+
 				"if it is a path, the working tree does not have it — put it after \"--\"", arg)
 		}
 	}
-	return revs, args[i:], nil
+	return revs, paths, nil
 }
 
 // expandRevRange rewrites git's two-dot range form so `forge diff a..b` means
