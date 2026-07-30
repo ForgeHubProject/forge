@@ -1117,12 +1117,9 @@ func runDiff(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		for _, path := range files {
-			if err := diffFile(repoDir, reg, path, base, head); err != nil {
-				fmt.Fprintf(os.Stderr, "forge: %s: %v\n", path, err)
-			}
-		}
-		return nil
+		return renderPaths(files, func(path string) error {
+			return diffFile(repoDir, reg, path, base, head)
+		})
 	}
 
 	var changed []string
@@ -1140,11 +1137,12 @@ func runDiff(cmd *cobra.Command, args []string) error {
 		fmt.Println("no changes")
 		return nil
 	}
-	for _, path := range changed {
-		if err := diffFile(repoDir, reg, path, base, head); err != nil {
-			fmt.Fprintf(os.Stderr, "forge: %s: %v\n", path, err)
-		}
-	}
+	// A survey of everything that changed reports the paths it could not read and
+	// still exits zero, as forge diff did before it took revisions; only a path
+	// the caller named carries its failure into the exit status.
+	_ = renderPaths(changed, func(path string) error {
+		return diffFile(repoDir, reg, path, base, head)
+	})
 	return nil
 }
 
