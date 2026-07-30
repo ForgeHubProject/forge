@@ -19,11 +19,12 @@ type Payload struct {
 	FilePath   string // repo-relative path being diffed, for display
 	HandlerID  string // e.g. "gltf-scene", shown in the header
 	Mode       string // "diff" (default) or "merge"
+	Compare    string // which two versions these blobs are, for the header (may be "")
 	DiffJSON   []byte // marshaled StructuredDiff
 	RendererJS string // path to the installed renderer bundle
 	Renderer3D string // path to the renderer's optional lazy 3D chunk (may be "")
-	Base       []byte // HEAD blob (may be nil)
-	Head       []byte // working-tree blob (may be nil)
+	Base       []byte // the base side's blob (may be nil)
+	Head       []byte // the head side's blob (may be nil)
 }
 
 // Serve starts the loopback server, prints the URL, tries to open a browser,
@@ -37,7 +38,11 @@ func Serve(p Payload, openBrowser bool) error {
 
 	srv := &http.Server{Handler: withCSP(p.handler())}
 
-	fmt.Printf("forge diff for %s — computed locally, served at:\n\n    %s\n\n", p.FilePath, url)
+	subject := p.FilePath
+	if p.Compare != "" {
+		subject += " (" + p.Compare + ")"
+	}
+	fmt.Printf("forge diff for %s — computed locally, served at:\n\n    %s\n\n", subject, url)
 	fmt.Println("Press Ctrl-C to stop.")
 	if openBrowser {
 		tryOpen(url)
@@ -58,7 +63,7 @@ func (p Payload) handler() http.Handler {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(w, indexHTML, htmlEscape(p.FilePath), htmlEscape(p.HandlerID))
+		fmt.Fprintf(w, indexHTML, htmlEscape(p.FilePath), htmlEscape(p.metaLine()))
 	})
 
 	mux.HandleFunc("/app.js", func(w http.ResponseWriter, r *http.Request) {

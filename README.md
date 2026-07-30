@@ -180,6 +180,36 @@ forge diff character.blend  (no BlenderHandler installed)
 
 ---
 
+## History — `forge diff <revision>` and `forge show`
+
+Committing does not put a change out of reach: git keeps both versions of every
+file, so a handler can be handed any two of them.
+
+```
+forge diff                        the working tree against HEAD
+forge diff <revision>             the working tree against a revision
+forge diff <base> <head>          revision to revision
+forge show <revision>             what one commit changed, against its first parent
+```
+
+Revisions are whatever git resolves — object id, branch, tag, `HEAD~2`,
+`<base>..<head>`. Paths may follow them, and `--` separates the two when an
+argument is both a revision and a filename, exactly as in git. Paths a handler
+claims get the semantic diff; the rest fall through to git's text diff, so the
+commands are useful on mixed commits and not only on handled files.
+
+```
+forge show HEAD
+  → resolve the commit, list what it changed against its first parent
+  → for each path: handler.Diff(blob at parent, blob at commit) → StructuredDiff
+  → paths with no handler are summarised with git's own line counts
+```
+
+A file one side does not have arrives at the handler as an empty blob, which is
+what "wholly added" and "wholly removed" mean. `--web` takes the same revisions.
+
+---
+
 ## Local web diff — `forge diff --web`
 
 The terminal is fine for a change tree, but some formats read better in a
@@ -203,6 +233,11 @@ diff on ForgeHub: the same renderer bundle mounts the same `StructuredDiff`,
 just computed by your `forge` instead of the server. `--no-open` prints the URL
 without launching a browser. Renderer bundles are installed alongside handlers
 by `forge formats add`.
+
+The page takes revisions too — `forge diff --web <base> <head> <file>` renders a
+historical change — and its header names which two versions are on screen, so a
+rendered page never leaves you guessing whether you are looking at uncommitted
+work or at a commit.
 
 ---
 
