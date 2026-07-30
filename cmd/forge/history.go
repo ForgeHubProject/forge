@@ -397,8 +397,16 @@ func handlerFormat(h handler.ForgeHandler) string {
 // gitDiffArgs builds the git invocation comparing two sources: a revision
 // against the working tree, revision against revision, or — where the base is
 // nothing, as a root commit's is — the commit against the empty tree.
+//
+// Rename detection is turned off, because forge compares one path at a time and
+// a rename git reports as one record names only its destination: the source
+// would never be listed and so never be reported gone, while the destination —
+// a path the base side does not have — would be compared against nothing and
+// read as wholly added, however unchanged its bytes. Both halves are listed
+// instead, each honest about the side that holds it.
 func gitDiffArgs(base, head blobSource, flags, pathspecs []string) []string {
 	var args []string
+	flags = append([]string{"--no-renames"}, flags...)
 	switch {
 	case base.kind == sourceRevision && head.kind == sourceRevision:
 		args = append(append([]string{"diff"}, flags...), base.rev, head.rev)
@@ -417,8 +425,8 @@ func gitDiffArgs(base, head blobSource, flags, pathspecs []string) []string {
 }
 
 // changedPaths lists the files that differ between two sources, restricted to
-// the given pathspecs. --name-only reports one path per changed file (a rename
-// arrives as its destination), so every record is a file to compare.
+// the given pathspecs. --name-only reports one path per changed file, and
+// gitDiffArgs leaves renames undetected, so every record is a file to compare.
 func changedPaths(repoDir string, base, head blobSource, pathspecs []string) ([]string, error) {
 	out, err := gitOutput(repoDir, gitDiffArgs(base, head, []string{"--name-only", "-z"}, pathspecs)...)
 	if err != nil {
