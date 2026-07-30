@@ -203,6 +203,30 @@ func TestDiffFileAbsentAtBothSidesReportsAndContinues(t *testing.T) {
 	mustContain(t, out, "ghost.unit: not in HEAD~1 or HEAD", b64("v1"), b64("v2"))
 }
 
+// A third revision cannot be absorbed: git gives three or more a meaning of its
+// own, so comparing the first two and dropping the rest would report a
+// comparison nobody asked for while exiting zero. "--" is the only way past the
+// leading-revision guess, so it is the only way to reach this.
+func TestDiffRefusesMoreThanTwoRevisions(t *testing.T) {
+	newHistoryRepo(t)
+
+	for _, args := range [][]string{
+		{"HEAD~1", "HEAD", "HEAD~1", "--", "asset.unit"},
+		{"HEAD~1", "HEAD", "HEAD~1", "HEAD", "--", "asset.unit"},
+		{"HEAD~1", "HEAD", "HEAD~1", "--"},
+		{"--web", "--no-open", "HEAD~1", "HEAD", "HEAD~1", "--", "asset.unit"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			out, err := runForge(t, diffCmd(), args...)
+			if err == nil || !strings.Contains(err.Error(), "at most two revisions") {
+				t.Fatalf("expected a refusal, got: %v\n%s", err, out)
+			}
+			// It must refuse rather than compare some other pair of sources.
+			mustNotContain(t, out, "payload", "--- a/")
+		})
+	}
+}
+
 func TestDiffRejectsPathsOutsideTheRepository(t *testing.T) {
 	newHistoryRepo(t)
 
@@ -432,6 +456,10 @@ func TestSplitRevsAndPaths(t *testing.T) {
 		{"absent path after the separator", []string{"ghost.unit"}, 0, nil, []string{"ghost.unit"}},
 		{"absent path after two revisions", []string{"HEAD~1", "HEAD", "ghost.unit"}, -1,
 			[]string{"HEAD~1", "HEAD"}, []string{"ghost.unit"}},
+		// Everything before the separator comes back whatever the count: how many
+		// revisions are allowed is diffSources' and runShow's to say, not this.
+		{"three revisions before the separator", []string{"HEAD~1", "HEAD", "HEAD~1"}, 3,
+			[]string{"HEAD~1", "HEAD", "HEAD~1"}, nil},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -462,6 +490,31 @@ func TestSplitRevsAndPaths(t *testing.T) {
 		if revs, paths, err := splitRevsAndPaths(repo, c.args, -1); err == nil {
 			t.Errorf("%s: %v must be refused, got revs %v paths %v", c.name, c.args, revs, paths)
 		}
+	}
+}
+
+func TestDiffSourcesArity(t *testing.T) {
+	repo := newHistoryRepo(t)
+
+	for _, c := range []struct {
+		revs               []string
+		wantBase, wantHead string
+	}{
+		{revs: nil, wantBase: "HEAD", wantHead: "the working tree"},
+		{revs: []string{"HEAD~1"}, wantBase: "HEAD~1", wantHead: "the working tree"},
+		{revs: []string{"HEAD~1", "HEAD"}, wantBase: "HEAD~1", wantHead: "HEAD"},
+	} {
+		base, head, err := diffSources(repo, c.revs)
+		if err != nil {
+			t.Fatalf("diffSources(%v): %v", c.revs, err)
+		}
+		if base.name != c.wantBase || head.name != c.wantHead {
+			t.Errorf("diffSources(%v) = %s → %s, want %s → %s", c.revs, base, head, c.wantBase, c.wantHead)
+		}
+	}
+
+	if _, _, err := diffSources(repo, []string{"HEAD~1", "HEAD", "HEAD~1"}); err == nil {
+		t.Error("three revisions must be refused, not silently cut to two")
 	}
 }
 

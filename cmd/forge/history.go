@@ -96,6 +96,10 @@ func pathExists(p string) bool {
 // paths. An argument that is both a revision and an existing file is refused
 // exactly as git refuses it, because only "--" can say which was meant.
 //
+// The arguments before a "--" come back as given, however many there are: how
+// many revisions are allowed is the command's own to say, as forge show and
+// diffSources each do.
+//
 // While a revision is still possible, an argument that is neither a revision git
 // resolves nor a file on disk is refused by name, as git refuses it: a mistyped
 // revision is indistinguishable from a file that is not there, and reading it as
@@ -152,6 +156,12 @@ func expandRevRange(repoDir string, args []string, dashAt int) ([]string, int) {
 // diffSources maps forge diff's revision arguments onto the two sides being
 // compared: none is the working tree against HEAD, one is the working tree
 // against that revision, two is revision to revision.
+//
+// More than two is refused. git gives three or more revisions a meaning of its
+// own, and one whose result differs from comparing the first two, so keeping
+// only the first two would report a comparison the caller did not ask for while
+// exiting zero — indistinguishable, to anything reading the status, from the
+// comparison that was asked for.
 func diffSources(repoDir string, revs []string) (base, head blobSource, err error) {
 	switch len(revs) {
 	case 0:
@@ -168,7 +178,7 @@ func diffSources(repoDir string, revs []string) (base, head blobSource, err erro
 			return base, head, err
 		}
 		return revisionSource(revs[0], commit), worktreeSource(), nil
-	default:
+	case 2:
 		baseCommit, err := resolveRev(repoDir, revs[0])
 		if err != nil {
 			return base, head, err
@@ -178,6 +188,9 @@ func diffSources(repoDir string, revs []string) (base, head blobSource, err erro
 			return base, head, err
 		}
 		return revisionSource(revs[0], baseCommit), revisionSource(revs[1], headCommit), nil
+	default:
+		return base, head, fmt.Errorf("forge diff takes at most two revisions, got %d: %s\n"+
+			"if some of those are paths, put them after \"--\"", len(revs), strings.Join(revs, " "))
 	}
 }
 
