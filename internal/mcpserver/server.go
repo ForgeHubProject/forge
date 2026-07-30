@@ -338,8 +338,14 @@ func (s *server) resolve(p string) (string, error) {
 		return "", fmt.Errorf("%s is outside the repository this server serves", p)
 	}
 	// The last component is deliberately left unfollowed: a link there is content
-	// git records as content, and forgerepo compares it as the path it names.
+	// git records as content, and forgerepo compares it as the path it names. The
+	// root has no such component — it is the boundary rather than a step towards
+	// it — so the walk starts at the root itself instead of above it, where
+	// nothing is ever contained.
 	dir := filepath.Dir(abs)
+	if rel == "." {
+		dir = abs
+	}
 	for {
 		resolved, err := filepath.EvalSymlinks(dir)
 		if err == nil {
