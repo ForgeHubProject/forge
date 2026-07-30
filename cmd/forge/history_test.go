@@ -85,6 +85,25 @@ func newHistoryRepo(t *testing.T) string {
 	return repo
 }
 
+// newEmptyRepo builds a repository with no commits: the handler is installed and
+// one handled file is on disk, but there is no HEAD for anything to compare
+// against. It returns the repo root and chdirs into it.
+func newEmptyRepo(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the stub handler is a POSIX shell script")
+	}
+	installStubHandler(t)
+
+	repo := t.TempDir()
+	gitT(t, repo, "init", "-b", "main", repo)
+	writeFileT(t, filepath.Join(repo, ".forge", "formats"), ".unit\n")
+	writeFileT(t, filepath.Join(repo, "asset.unit"), "v1")
+
+	t.Chdir(repo)
+	return repo
+}
+
 // runForge executes one command in the current directory and captures
 // everything it writes, including the output of the git subprocesses it
 // delegates to.
@@ -198,15 +217,80 @@ func TestDiffRejectsPathsOutsideTheRepository(t *testing.T) {
 	}
 }
 
+// Every shape of unresolvable revision is refused by name, not just the ones
+// carrying revision syntax or a bare object id: a misspelt branch read as a path
+// would compare the wrong pair of sources and still exit zero.
 func TestDiffBadRevisionNamesIt(t *testing.T) {
+	repo := newHistoryRepo(t)
+	gitT(t, repo, "branch", "basex")
+
+	cases := []struct {
+		args []string
+		bad  string
+	}{
+		{[]string{"HEAD~99"}, "HEAD~99"},
+		{[]string{"deadbeef1234567"}, "deadbeef1234567"},
+		{[]string{"basxe"}, "basxe"},               // a misspelt branch
+		{[]string{"nosuchref123"}, "nosuchref123"}, // ... whatever it is made of
+		{[]string{"basxe", "asset.unit"}, "basxe"}, // ... with a path after it
+		{[]string{"HEAD~1", "basxe"}, "basxe"},     // ... on the head side
+		{[]string{"basxe..HEAD"}, "basxe..HEAD"},   // ... or inside a range
+	}
+	for _, c := range cases {
+		t.Run(strings.Join(c.args, " "), func(t *testing.T) {
+			out, err := runForge(t, diffCmd(), c.args...)
+			if err == nil || !strings.Contains(err.Error(), "not a valid revision: "+c.bad) {
+				t.Fatalf("expected a clean error naming %s, got: %v\n%s", c.bad, err, out)
+			}
+			// It must refuse instead of comparing some other pair of sources.
+			mustNotContain(t, out, "payload", "--- a/")
+		})
+	}
+}
+
+// A path the working tree does not have — deleted, or only ever in history — is
+// indistinguishable from a misspelt revision, so forge refuses it as git does
+// and the separator is how the caller says a path was meant.
+func TestDiffAbsentPathNeedsSeparator(t *testing.T) {
 	newHistoryRepo(t)
 
-	for _, arg := range []string{"HEAD~99", "deadbeef1234567"} {
-		_, err := runForge(t, diffCmd(), arg)
-		if err == nil || !strings.Contains(err.Error(), "not a valid revision: "+arg) {
-			t.Fatalf("expected a clean error naming %s, got: %v", arg, err)
-		}
+	_, err := runForge(t, diffCmd(), "removed.unit")
+	if err == nil {
+		t.Fatal("a path the working tree does not have must be refused without \"--\"")
 	}
+	mustContain(t, err.Error(), "not a valid revision: removed.unit", "--")
+
+	out, err := runForge(t, diffCmd(), "HEAD~1", "--", "removed.unit")
+	if err != nil {
+		t.Fatalf("forge diff HEAD~1 -- removed.unit: %v\n%s", err, out)
+	}
+	mustContain(t, out, "- [payload] "+b64("gone"))
+}
+
+// A repository with no commits has no HEAD, so a revision argument cannot
+// resolve there either and is refused rather than quietly reread as a path. What
+// forge does compare against is named for what it is, since that name is printed.
+func TestDiffEmptyRepository(t *testing.T) {
+	newEmptyRepo(t)
+
+	_, err := runForge(t, diffCmd(), "HEAD")
+	if err == nil || !strings.Contains(err.Error(), "not a valid revision: HEAD") {
+		t.Fatalf("expected HEAD to be refused where there are no commits, got: %v", err)
+	}
+
+	// With nothing to compare against, the working tree reads as wholly added.
+	out, err := runForge(t, diffCmd())
+	if err != nil {
+		t.Fatalf("forge diff: %v\n%s", err, out)
+	}
+	mustContain(t, out, "+ [payload] "+b64("v1"))
+
+	out, err = runForge(t, diffCmd(), "--", "ghost.unit")
+	if err != nil {
+		t.Fatalf("forge diff -- ghost.unit: %v\n%s", err, out)
+	}
+	mustContain(t, out, "ghost.unit: not in an empty repository or the working tree")
+	mustNotContain(t, out, "nothing")
 }
 
 // An argument that is both a branch and a file can only be disambiguated by the
@@ -343,6 +427,11 @@ func TestSplitRevsAndPaths(t *testing.T) {
 		{"path only", []string{"notes.txt"}, -1, nil, []string{"notes.txt"}},
 		{"separator overrides the guess", []string{"HEAD", "asset.unit"}, 1, []string{"HEAD"}, []string{"asset.unit"}},
 		{"everything after the separator is a path", []string{"HEAD"}, 0, nil, []string{"HEAD"}},
+		// Once no further revision can be meant, a path no side holds is kept
+		// rather than refused, so the caller reports it absent.
+		{"absent path after the separator", []string{"ghost.unit"}, 0, nil, []string{"ghost.unit"}},
+		{"absent path after two revisions", []string{"HEAD~1", "HEAD", "ghost.unit"}, -1,
+			[]string{"HEAD~1", "HEAD"}, []string{"ghost.unit"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -359,8 +448,20 @@ func TestSplitRevsAndPaths(t *testing.T) {
 		})
 	}
 
-	if _, _, err := splitRevsAndPaths(repo, []string{"asset.unit"}, -1); err == nil {
-		t.Fatal("an argument that is both a revision and a file must be refused")
+	// While a revision is still possible, an argument that is not one and is not
+	// a file either can only be a mistake, and saying which it was is the
+	// caller's to do.
+	for _, c := range []struct {
+		name string
+		args []string
+	}{
+		{"both a revision and a file", []string{"asset.unit"}},
+		{"neither a revision nor a file", []string{"no-such-name"}},
+		{"a bad head revision", []string{"HEAD~1", "no-such-name"}},
+	} {
+		if revs, paths, err := splitRevsAndPaths(repo, c.args, -1); err == nil {
+			t.Errorf("%s: %v must be refused, got revs %v paths %v", c.name, c.args, revs, paths)
+		}
 	}
 }
 
