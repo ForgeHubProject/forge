@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/forgehubproject/forge/internal/forgerepo"
 	"github.com/spf13/cobra"
 )
 
@@ -444,8 +445,8 @@ func TestDiffGitlinkIsPresentAndDiffedByGit(t *testing.T) {
 	repo := newGitlinkRepo(t)
 	head := gitOutputT(t, repo, "rev-parse", "HEAD")
 
-	if got := sourceEntry(repo, revisionSource("HEAD", head), "inner"); got != "commit" {
-		t.Errorf("sourceEntry for a gitlink = %q, want \"commit\"", got)
+	if got := forgerepo.SourceEntry(repo, forgerepo.RevisionSource("HEAD", head), "inner"); got != "commit" {
+		t.Errorf("forgerepo.SourceEntry for a gitlink = %q, want \"commit\"", got)
 	}
 
 	for _, path := range []string{"inner", "pinned.unit"} {
@@ -767,7 +768,7 @@ func TestSplitRevsAndPaths(t *testing.T) {
 		{"a branch that is also a file, after two revisions", []string{"HEAD~1", "HEAD", "asset.unit"}, -1,
 			[]string{"HEAD~1", "HEAD"}, []string{"asset.unit"}},
 		// The revisions come back whatever the count, with or without a separator:
-		// how many are allowed is diffSources' and runShow's to say, not this. A
+		// how many are allowed is DiffSources' and runShow's to say, not this. A
 		// third read as a path instead would be dropped from a comparison that
 		// then reported success.
 		{"three revisions before the separator", []string{"HEAD~1", "HEAD", "HEAD~1"}, 3,
@@ -781,7 +782,7 @@ func TestSplitRevsAndPaths(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			revs, paths, err := splitRevsAndPaths(repo, c.args, c.dashAt)
+			revs, paths, err := forgerepo.SplitRevsAndPaths(repo, c.args, c.dashAt)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -812,7 +813,7 @@ func TestSplitRevsAndPaths(t *testing.T) {
 		{"a revision after two revisions and a path", []string{"HEAD~1", "HEAD", "notes.txt", "HEAD~1"}},
 		{"a revision after an absent path", []string{"HEAD~1", "HEAD", "ghost.unit", "HEAD~1"}},
 	} {
-		if revs, paths, err := splitRevsAndPaths(repo, c.args, -1); err == nil {
+		if revs, paths, err := forgerepo.SplitRevsAndPaths(repo, c.args, -1); err == nil {
 			t.Errorf("%s: %v must be refused, got revs %v paths %v", c.name, c.args, revs, paths)
 		}
 	}
@@ -829,16 +830,16 @@ func TestDiffSourcesArity(t *testing.T) {
 		{revs: []string{"HEAD~1"}, wantBase: "HEAD~1", wantHead: "the working tree"},
 		{revs: []string{"HEAD~1", "HEAD"}, wantBase: "HEAD~1", wantHead: "HEAD"},
 	} {
-		base, head, err := diffSources(repo, c.revs)
+		base, head, err := forgerepo.DiffSources(repo, c.revs)
 		if err != nil {
-			t.Fatalf("diffSources(%v): %v", c.revs, err)
+			t.Fatalf("forgerepo.DiffSources(%v): %v", c.revs, err)
 		}
-		if base.name != c.wantBase || head.name != c.wantHead {
-			t.Errorf("diffSources(%v) = %s → %s, want %s → %s", c.revs, base, head, c.wantBase, c.wantHead)
+		if base.Name != c.wantBase || head.Name != c.wantHead {
+			t.Errorf("forgerepo.DiffSources(%v) = %s → %s, want %s → %s", c.revs, base, head, c.wantBase, c.wantHead)
 		}
 	}
 
-	if _, _, err := diffSources(repo, []string{"HEAD~1", "HEAD", "HEAD~1"}); err == nil {
+	if _, _, err := forgerepo.DiffSources(repo, []string{"HEAD~1", "HEAD", "HEAD~1"}); err == nil {
 		t.Error("three revisions must be refused, not silently cut to two")
 	}
 }
@@ -851,18 +852,18 @@ func TestRepoRelPath(t *testing.T) {
 		{"./asset.unit", "asset.unit"},
 		{filepath.Join(repo, "sub", "asset.unit"), "sub/asset.unit"},
 	} {
-		got, err := repoRelPath(repo, c.in)
+		got, err := forgerepo.RelPath(repo, c.in)
 		if err != nil {
-			t.Fatalf("repoRelPath(%q): %v", c.in, err)
+			t.Fatalf("forgerepo.RelPath(%q): %v", c.in, err)
 		}
 		if got != c.want {
-			t.Errorf("repoRelPath(%q) = %q, want %q", c.in, got, c.want)
+			t.Errorf("forgerepo.RelPath(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 
 	for _, in := range []string{"../escape.unit", "sub/../../escape.unit", "/etc/passwd"} {
-		if got, err := repoRelPath(repo, in); err == nil {
-			t.Errorf("repoRelPath(%q) = %q, want a refusal", in, got)
+		if got, err := forgerepo.RelPath(repo, in); err == nil {
+			t.Errorf("forgerepo.RelPath(%q) = %q, want a refusal", in, got)
 		}
 	}
 }
@@ -871,7 +872,7 @@ func TestRepoRelPath(t *testing.T) {
 // git does.
 func gitOutputT(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	out, err := gitOutput(dir, args...)
+	out, err := forgerepo.GitOutput(dir, args...)
 	if err != nil {
 		t.Fatalf("git %v: %v", args, err)
 	}
