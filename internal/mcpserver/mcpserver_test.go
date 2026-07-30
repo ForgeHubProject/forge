@@ -1384,6 +1384,44 @@ func TestAPathThroughALinkedDirectoryIsRefused(t *testing.T) {
 	}
 }
 
+// The root is a directory inside the repository like any other, and every
+// spelling that names it is one an agent may send. Refusing it would be wrong on
+// its own; refusing it with the sentence above would tell an agent that a
+// repository holding no link at all routes a path out of itself through one.
+func TestTheRepositoryRootIsAPathTheToolsAnswer(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+
+	for _, p := range []string{".", "./", "sub/..", "sub/../."} {
+		rel, err := s.resolve(p)
+		if err != nil {
+			t.Errorf("resolve(%q): %v", p, err)
+			continue
+		}
+		if rel != "." {
+			t.Errorf("resolve(%q) = %q, the root is %q", p, rel, ".")
+		}
+	}
+
+	_, shown, err := s.show(ctx, nil, showIn{Ref: "HEAD", Path: "."})
+	if err != nil {
+		t.Fatalf("forge_show refused the root: %v", err)
+	}
+	if len(shown.Files) == 0 {
+		t.Error("narrowing a listing to the root drops every file in it")
+	}
+	_, diffed, err := s.semanticDiff(ctx, nil, semanticDiffIn{Path: "."})
+	if err != nil {
+		t.Fatalf("forge_semantic_diff refused the root: %v", err)
+	}
+	if diffed.Path != "." {
+		t.Errorf("the answer is for %q, not the root asked about", diffed.Path)
+	}
+	if _, _, err := s.handlerFor(ctx, nil, handlerForIn{Path: "."}); err != nil {
+		t.Fatalf("forge_handler_for refused the root: %v", err)
+	}
+}
+
 // A link committed in the repository is content, not a window onto whatever it
 // names. Reading through one lets the repository under review choose the bytes an
 // agent is shown, and leaves the two sides of the comparison disagreeing about
