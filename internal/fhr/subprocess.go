@@ -2,31 +2,43 @@ package fhr
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/forgehubproject/forge/internal/handler"
 )
 
 // SubprocessHandler wraps an FHR handler binary as a ForgeHandler.
 // Match is fast (extension check from metadata); Diff/Merge spawn the subprocess.
+//
+// ctx is held rather than taken per call because ForgeHandler's methods take
+// none: it bounds the subprocesses this handler spawns, so a caller that builds
+// one registry per cancellable unit of work — a request rather than a process —
+// gets a handler that dies with that work instead of outliving it.
 type SubprocessHandler struct {
 	binaryPath string
 	id         string
 	formats    []string
+	ctx        context.Context
 }
 
 // NewSubprocessHandler builds a SubprocessHandler from a binary path and
 // pre-loaded metadata (avoids an info subprocess call on every registry build).
-func NewSubprocessHandler(binaryPath string, meta InstalledMeta) *SubprocessHandler {
+func NewSubprocessHandler(ctx context.Context, binaryPath string, meta InstalledMeta) *SubprocessHandler {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	return &SubprocessHandler{
 		binaryPath: binaryPath,
 		id:         meta.ID,
 		formats:    meta.Formats,
+		ctx:        ctx,
 	}
 }
 
@@ -54,7 +66,7 @@ func (h *SubprocessHandler) Diff(base, head handler.Blob) (handler.StructuredDif
 		Base: base64.StdEncoding.EncodeToString(base),
 		Head: base64.StdEncoding.EncodeToString(head),
 	})
-	out, err := runSubprocess(h.binaryPath, "diff", inp)
+	out, err := runSubprocess(h.ctx, h.binaryPath, "diff", inp)
 	if err != nil {
 		return handler.StructuredDiff{}, err
 	}
@@ -76,7 +88,7 @@ func (h *SubprocessHandler) Merge(base, ours, theirs handler.Blob) (handler.Blob
 		Ours:   base64.StdEncoding.EncodeToString(ours),
 		Theirs: base64.StdEncoding.EncodeToString(theirs),
 	})
-	out, err := runSubprocess(h.binaryPath, "merge", inp)
+	out, err := runSubprocess(h.ctx, h.binaryPath, "merge", inp)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -98,12 +110,63 @@ func (h *SubprocessHandler) Merge(base, ours, theirs handler.Blob) (handler.Blob
 	return merged, ci, nil
 }
 
-func runSubprocess(binary, subcommand string, stdin []byte) ([]byte, error) {
-	cmd := exec.Command(binary, subcommand)
+// Info is what a handler binary answers for the protocol's "info" call: the id
+// it goes by, its own version, the extensions it claims, and the protocol
+// revision it speaks. Capabilities is the handler's own declaration — a handler
+// that omits it has said nothing about what it supports, which is not the same
+// as saying it supports nothing.
+type Info struct {
+	ID           string            `json:"id"`
+	Version      string            `json:"version"`
+	Protocol     string            `json:"protocol"`
+	Formats      []string          `json:"formats"`
+	Capabilities *InfoCapabilities `json:"capabilities,omitempty"`
+}
+
+// InfoCapabilities is the optional capability block of an info answer. Both
+// fields are pointers so an undeclared capability stays distinguishable from
+// one declared false.
+type InfoCapabilities struct {
+	SemanticCompare *bool `json:"semanticCompare,omitempty"`
+	SemanticMerge   *bool `json:"semanticMerge,omitempty"`
+}
+
+// HandlerInfo asks an installed handler binary to describe itself. The call is
+// optional in the protocol, so a handler that does not implement it fails here
+// and the caller reports the absence rather than inventing an answer.
+func HandlerInfo(ctx context.Context, binaryPath string) (*Info, error) {
+	out, err := runSubprocess(ctx, binaryPath, "info", nil)
+	if err != nil {
+		return nil, err
+	}
+	var info Info
+	if err := json.Unmarshal(out, &info); err != nil {
+		return nil, fmt.Errorf("parsing info output from %s: %w", filepath.Base(binaryPath), err)
+	}
+	return &info, nil
+}
+
+// subprocessWaitDelay bounds how long a killed handler's pipes are waited on
+// once its context is done.
+const subprocessWaitDelay = 2 * time.Second
+
+// runSubprocess runs one handler call to completion. The context is the caller's
+// bound on it: a handler that never returns is killed with the work that asked
+// for it rather than left behind, which is the difference between a command and
+// a server that keeps answering.
+func runSubprocess(ctx context.Context, binary, subcommand string, stdin []byte) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cmd := exec.CommandContext(ctx, binary, subcommand)
 	cmd.Stdin = bytes.NewReader(stdin)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	// A killed handler that left a child of its own holding the pipes would
+	// otherwise keep this wait — and a caller shutting down behind it — blocked
+	// on output nobody is going to read.
+	cmd.WaitDelay = subprocessWaitDelay
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("%s %s: %w (stderr: %s)",
 			filepath.Base(binary), subcommand, err, bytes.TrimSpace(stderr.Bytes()))
