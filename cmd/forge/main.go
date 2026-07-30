@@ -23,6 +23,7 @@ import (
 	"github.com/forgehubproject/forge/internal/forgerepo"
 	"github.com/forgehubproject/forge/internal/gitrepo"
 	"github.com/forgehubproject/forge/internal/handler"
+	"github.com/forgehubproject/forge/internal/mcpserver"
 	"github.com/forgehubproject/forge/internal/webdiff"
 	gogit "github.com/go-git/go-git/v5"
 	gogitconfig "github.com/go-git/go-git/v5/config"
@@ -66,6 +67,7 @@ func rootCmd() *cobra.Command {
 		pullCmd(),
 		sourceCmd(),
 		formatsCmd(),
+		mcpCmd(),
 		gitPassthrough("add", "Stage file contents (delegates to git)"),
 		gitPassthrough("commit", "Record staged changes (delegates to git)"),
 		gitPassthrough("branch", "List, create or delete branches (delegates to git)"),
@@ -1641,6 +1643,31 @@ func runMergeFile(_ *cobra.Command, args []string) error {
 
 	fmt.Printf("Merged cleanly into %s\n", oursPath)
 	return nil
+}
+
+// ── forge mcp ───────────────────────────────────────────────────────────────────────────────────────
+
+func mcpCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "mcp",
+		Short: "Serve this repository to an MCP client over stdio",
+		Long: `Runs a Model Context Protocol server over stdin and stdout, so an agent can
+ask the questions forge can answer: what changed inside a file whose format has
+a handler, which handler claims a path, what a commit changed.
+
+Every tool is read-only, and the source list — forge's trust boundary — is
+reported but never modified. The repository is the one this command is run in,
+resolved once at startup; every path an agent passes is resolved against that
+root and refused if it points outside.
+
+stdout carries the protocol, so run it from a client rather than a terminal:
+
+  { "mcpServers": { "forge": { "command": "forge", "args": ["mcp"] } } }`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return mcpserver.Run(cmd.Context())
+		},
+	}
 }
 
 // ── forge source ────────────────────────────────────────────────────────────────────────────────────

@@ -241,6 +241,39 @@ work or at a commit.
 
 ---
 
+## Agents — `forge mcp`
+
+An agent reviewing a repository full of structured files is blind exactly where a
+person is: `git diff` answers "binary files differ" and the conversation ends.
+`forge mcp` runs a Model Context Protocol server over stdio, so the semantic
+layer is reachable by a client and not only by a terminal:
+
+```json
+{ "mcpServers": { "forge": { "command": "forge", "args": ["mcp"] } } }
+```
+
+Six read-only tools: `forge_status`, `forge_semantic_diff`, `forge_show`,
+`forge_handler_for`, `forge_formats`, `forge_source_list`. The revision semantics
+are `forge diff`'s, computed by the same function, so an agent and a terminal get
+the same answer for the same arguments. Every semantic payload carries the
+handler id and the build that produced it.
+
+Responses are paginated on purpose. A change tree can be enormous, so a call
+returns a summary plus a capped, depth-first slice of the tree and
+`truncated{returned, total, hint}`; the hint names the paths to pass back as
+`at`, and `kinds` narrows to the changes being looked for. A response that does
+not say it was truncated was not — silent truncation would let an agent conclude
+a change set was complete when it was not.
+
+The repository is the one the command was started in, resolved once; every path
+an agent passes is resolved against that root and refused if it escapes. The
+server never changes directory, never writes, and never touches the source list:
+adding a source is a human action at a terminal by design, because an agent that
+could perform that consenting act could be talked into it by the very repository
+content it is reviewing (issue #47).
+
+---
+
 ## Handler Ecosystem
 
 ### Official handlers
