@@ -98,6 +98,42 @@ func (h *SubprocessHandler) Merge(base, ours, theirs handler.Blob) (handler.Blob
 	return merged, ci, nil
 }
 
+// Info is what a handler binary answers for the protocol's "info" call: the id
+// it goes by, its own version, the extensions it claims, and the protocol
+// revision it speaks. Capabilities is the handler's own declaration — a handler
+// that omits it has said nothing about what it supports, which is not the same
+// as saying it supports nothing.
+type Info struct {
+	ID           string            `json:"id"`
+	Version      string            `json:"version"`
+	Protocol     string            `json:"protocol"`
+	Formats      []string          `json:"formats"`
+	Capabilities *InfoCapabilities `json:"capabilities,omitempty"`
+}
+
+// InfoCapabilities is the optional capability block of an info answer. Both
+// fields are pointers so an undeclared capability stays distinguishable from
+// one declared false.
+type InfoCapabilities struct {
+	SemanticCompare *bool `json:"semanticCompare,omitempty"`
+	SemanticMerge   *bool `json:"semanticMerge,omitempty"`
+}
+
+// HandlerInfo asks an installed handler binary to describe itself. The call is
+// optional in the protocol, so a handler that does not implement it fails here
+// and the caller reports the absence rather than inventing an answer.
+func HandlerInfo(binaryPath string) (*Info, error) {
+	out, err := runSubprocess(binaryPath, "info", nil)
+	if err != nil {
+		return nil, err
+	}
+	var info Info
+	if err := json.Unmarshal(out, &info); err != nil {
+		return nil, fmt.Errorf("parsing info output from %s: %w", filepath.Base(binaryPath), err)
+	}
+	return &info, nil
+}
+
 func runSubprocess(binary, subcommand string, stdin []byte) ([]byte, error) {
 	cmd := exec.Command(binary, subcommand)
 	cmd.Stdin = bytes.NewReader(stdin)
