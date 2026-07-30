@@ -40,6 +40,13 @@ func revisionSource(name, commit string) blobSource {
 
 func emptySource() blobSource { return blobSource{kind: sourceEmpty, name: "nothing"} }
 
+// emptyRepoSource is the empty side of a comparison in a repository with no
+// commits. It differs from emptySource only in its name, which is printed: a
+// root commit's parent is fairly called nothing, a whole repository is not.
+func emptyRepoSource() blobSource {
+	return blobSource{kind: sourceEmpty, name: "an empty repository"}
+}
+
 func (s blobSource) String() string { return s.name }
 
 // gitOutput runs git inside the repository and returns its stdout. A failure
@@ -83,30 +90,19 @@ func pathExists(p string) bool {
 	return err == nil
 }
 
-// looksLikeRevision reports whether an argument git could not resolve was
-// nevertheless meant as one: revision syntax, or a bare object id. Such an
-// argument is reported as a bad revision instead of being taken for a file that
-// happens not to exist, which is the mistake it usually is.
-func looksLikeRevision(arg string) bool {
-	if strings.ContainsAny(arg, "~^:@{}") {
-		return true
-	}
-	if len(arg) < 7 {
-		return false
-	}
-	for _, r := range arg {
-		if !strings.ContainsRune("0123456789abcdefABCDEF", r) {
-			return false
-		}
-	}
-	return true
-}
-
 // splitRevsAndPaths tells revisions from paths the way git does. Everything past
 // an explicit "--" (dashAt, from cobra's ArgsLenAtDash) is a path; otherwise
 // leading arguments that resolve as revisions are revisions and the rest are
 // paths. An argument that is both a revision and an existing file is refused
 // exactly as git refuses it, because only "--" can say which was meant.
+//
+// While a revision is still possible, an argument that is neither a revision git
+// resolves nor a file on disk is refused by name, as git refuses it: a mistyped
+// revision is indistinguishable from a file that is not there, and reading it as
+// a path would compare something other than what was asked for while reporting
+// success. Once the paths have begun — after "--", after a path, or after two
+// revisions, when no further revision can be meant — a path no side holds is
+// kept and reported absent instead.
 func splitRevsAndPaths(repoDir string, args []string, dashAt int) (revs, paths []string, err error) {
 	if dashAt >= 0 && dashAt <= len(args) {
 		return args[:dashAt], args[dashAt:], nil
@@ -121,10 +117,11 @@ func splitRevsAndPaths(repoDir string, args []string, dashAt int) (revs, paths [
 					"use \"--\" to separate paths from revisions, like: forge diff <revision> -- %s", arg, arg)
 			}
 			revs = append(revs, arg)
-		case !pathExists(arg) && looksLikeRevision(arg):
-			return nil, nil, fmt.Errorf("not a valid revision: %s", arg)
-		default:
+		case pathExists(arg):
 			return revs, args[i:], nil
+		default:
+			return nil, nil, fmt.Errorf("not a valid revision: %s\n"+
+				"if it is a path, the working tree does not have it — put it after \"--\"", arg)
 		}
 	}
 	return revs, args[i:], nil
@@ -162,7 +159,7 @@ func diffSources(repoDir string, revs []string) (base, head blobSource, err erro
 		if headErr != nil {
 			// A repository with no commits has nothing to compare against, so
 			// the whole working tree reads as newly added.
-			return emptySource(), worktreeSource(), nil
+			return emptyRepoSource(), worktreeSource(), nil
 		}
 		return revisionSource("HEAD", commit), worktreeSource(), nil
 	case 1:
@@ -439,8 +436,9 @@ func runShow(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	// The first argument is a revision by definition here, so one git cannot
-	// resolve is reported as the bad revision it was meant to be instead of
-	// being taken for a path that happens not to exist.
+	// resolve is reported as the bad revision it was meant to be even where a
+	// file of that name exists, which is the one reading splitRevsAndPaths
+	// prefers and forge show has no use for.
 	if len(revs) == 0 && dashAt != 0 {
 		return fmt.Errorf("not a valid revision: %s", args[0])
 	}
