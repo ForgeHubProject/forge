@@ -51,6 +51,7 @@ func rootCmd() *cobra.Command {
 		cloneCmd(),
 		statusCmd(),
 		diffCmd(),
+		showCmd(),
 		mergeCmd(),
 		mergeFileCmd(),
 		mergeToolCmd(),
@@ -1056,10 +1057,19 @@ func repoNameFromURL(url string) string {
 
 func diffCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "diff [file]",
-		Short: "Show semantic diff between working tree and HEAD",
-		Args:  cobra.MaximumNArgs(1),
-		RunE:  runDiff,
+		Use:   "diff [<revision> [<revision>]] [--] [<path>...]",
+		Short: "Show semantic diff between the working tree and a revision, or between two revisions",
+		Long: `Shows a semantic diff for every changed path a format handler claims, and
+git's own text diff for the rest.
+
+  forge diff                  the working tree against HEAD
+  forge diff <revision>       the working tree against a revision
+  forge diff <base> <head>    revision to revision
+
+Paths may follow the revisions. Use "--" when an argument is both a revision
+and a filename, and to name a path the working tree does not have.`,
+		Args: cobra.ArbitraryArgs,
+		RunE: runDiff,
 	}
 	cmd.Flags().Bool("web", false, "Render the diff in a local browser using the format's FHR renderer")
 	cmd.Flags().Bool("no-open", false, "With --web, print the URL but do not launch a browser")
@@ -1076,22 +1086,50 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	repoDir := findRepoRoot()
 
 	reg := defaultRegistry()
 
+	args, dashAt := expandRevRange(repoDir, args, cmd.ArgsLenAtDash())
+	revs, rawPaths, err := splitRevsAndPaths(repoDir, args, dashAt)
+	if err != nil {
+		return err
+	}
+	base, head, err := diffSources(repoDir, revs)
+	if err != nil {
+		return err
+	}
+	paths, err := repoRelPaths(repoDir, rawPaths)
+	if err != nil {
+		return err
+	}
+
 	if web, _ := cmd.Flags().GetBool("web"); web {
-		if len(args) != 1 {
+		if len(paths) != 1 {
 			return fmt.Errorf("forge diff --web needs exactly one file to render")
 		}
 		noOpen, _ := cmd.Flags().GetBool("no-open")
-		return diffFileWeb(repo, reg, cleanPath(args[0]), !noOpen)
+		return diffFileWeb(repoDir, reg, paths[0], base, head, !noOpen)
 	}
 
-	if len(args) == 1 {
-		return diffFile(repo, reg, cleanPath(args[0]))
+	if len(paths) > 0 {
+		files, err := comparePaths(repoDir, base, head, paths)
+		if err != nil {
+			return err
+		}
+		return renderPaths(files, func(path string) error {
+			return diffFile(repoDir, reg, path, base, head)
+		})
 	}
 
-	changed, err := repo.ChangedFiles()
+	var changed []string
+	if len(revs) == 0 {
+		// go-git's status, which also surfaces files the working tree has and
+		// HEAD does not — untracked work a revision listing cannot report.
+		changed, err = repo.ChangedFiles()
+	} else {
+		changed, err = changedPaths(repoDir, base, head, nil)
+	}
 	if err != nil {
 		return err
 	}
@@ -1099,11 +1137,12 @@ func runDiff(cmd *cobra.Command, args []string) error {
 		fmt.Println("no changes")
 		return nil
 	}
-	for _, path := range changed {
-		if err := diffFile(repo, reg, path); err != nil {
-			fmt.Fprintf(os.Stderr, "forge: %s: %v\n", path, err)
-		}
-	}
+	// A survey of everything that changed reports the paths it could not read and
+	// still exits zero, as forge diff did before it took revisions; only a path
+	// the caller named carries its failure into the exit status.
+	_ = renderPaths(changed, func(path string) error {
+		return diffFile(repoDir, reg, path, base, head)
+	})
 	return nil
 }
 
@@ -1111,87 +1150,64 @@ func cleanPath(p string) string {
 	return filepath.ToSlash(filepath.Clean(p))
 }
 
-func diffFile(repo *gitrepo.Repo, reg *handler.Registry, path string) error {
-	path = cleanPath(path)
-	h, err := reg.Resolve(path)
+// diffFile renders one path's change between two sources: the handler's change
+// tree, or git's own text diff for a path no handler claims. An error is the
+// caller's to report — one unreadable path does not end a multi-path diff.
+func diffFile(repoDir string, reg *handler.Registry, path string, base, head blobSource) error {
+	fc, err := compareFile(repoDir, reg, path, base, head)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "forge: %v\n", err)
-		return nil
+		return err
 	}
 
-	if n, ok := h.(interface{ Format() string }); ok && n.Format() == "text" {
-		c := exec.Command("git", "diff", "HEAD", "--", path)
+	switch {
+	case !fc.BaseFound && !fc.HeadFound:
+		fmt.Printf("%s: not in %s or %s\n", path, base, head)
+	case !fc.Semantic:
+		c := exec.Command("git", gitDiffArgs(base, head, nil, []string{path})...)
+		c.Dir = repoDir
 		c.Stdout = os.Stdout
 		c.Stderr = os.Stderr
 		_ = c.Run()
-		return nil
+	default:
+		renderDiff(path, fc.Diff)
 	}
-
-	base, err := repo.BlobAtHEAD(filepath.ToSlash(path))
-	if err != nil {
-		return fmt.Errorf("reading HEAD blob for %s: %w", path, err)
-	}
-
-	head, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("reading working tree file %s: %w", path, err)
-	}
-
-	diff, err := h.Diff(base, head)
-	if err != nil {
-		return fmt.Errorf("diff %s: %w", path, err)
-	}
-
-	renderDiff(path, diff)
 	return nil
 }
 
 // diffFileWeb computes the semantic diff locally and serves it to a loopback
 // browser page rendered by the format's FHR renderer bundle (SPEC-RENDERING §3b).
-func diffFileWeb(repo *gitrepo.Repo, reg *handler.Registry, path string, openBrowser bool) error {
-	path = cleanPath(path)
-	h, err := reg.Resolve(path)
+func diffFileWeb(repoDir string, reg *handler.Registry, path string, base, head blobSource, openBrowser bool) error {
+	fc, err := compareFile(repoDir, reg, path, base, head)
 	if err != nil {
 		return err
 	}
-	namer, ok := h.(handler.Namer)
-	if !ok || namer.Format() == "text" {
+	if !fc.Semantic {
 		return fmt.Errorf("--web needs a semantic handler; %s has none — use plain: forge diff %s", path, path)
 	}
-	handlerID := namer.Format()
-
-	base, err := repo.BlobAtHEAD(filepath.ToSlash(path))
-	if err != nil {
-		return fmt.Errorf("reading HEAD blob for %s: %w", path, err)
-	}
-	head, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("reading working tree file %s: %w", path, err)
+	if !fc.BaseFound && !fc.HeadFound {
+		return fmt.Errorf("%s is not in %s or %s", path, base, head)
 	}
 
-	diff, err := h.Diff(base, head)
-	if err != nil {
-		return fmt.Errorf("diff %s: %w", path, err)
-	}
-	diffJSON, err := json.Marshal(diff)
+	diffJSON, err := json.Marshal(fc.Diff)
 	if err != nil {
 		return fmt.Errorf("encoding diff: %w", err)
 	}
 
-	rendererPath, err := ensureRenderer(handlerID)
+	rendererPath, err := ensureRenderer(fc.HandlerID)
 	if err != nil {
 		return err
 	}
 
 	return webdiff.Serve(webdiff.Payload{
 		FilePath:   path,
-		HandlerID:  handlerID,
+		HandlerID:  fc.HandlerID,
 		Mode:       "diff",
+		Compare:    fmt.Sprintf("%s → %s", base, head),
 		DiffJSON:   diffJSON,
 		RendererJS: rendererPath,
-		Renderer3D: fhr.InstalledRenderer3D(handlerID),
-		Base:       base,
-		Head:       head,
+		Renderer3D: fhr.InstalledRenderer3D(fc.HandlerID),
+		Base:       fc.Base,
+		Head:       fc.Head,
 	}, openBrowser)
 }
 

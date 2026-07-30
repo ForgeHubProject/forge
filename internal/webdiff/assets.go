@@ -5,7 +5,7 @@ import (
 	"html"
 )
 
-// indexHTML is the shell page. Two %s: the file path and the handler id.
+// indexHTML is the shell page. Two %s: the file path and the meta line.
 // It loads the renderer as an ES module via /app.js; no inline script runs,
 // so the CSP can forbid inline scripts.
 const indexHTML = `<!doctype html>
@@ -31,7 +31,7 @@ const indexHTML = `<!doctype html>
 <body>
 <header>
   <span class="path">%s</span>
-  <span class="meta">handler: %s · computed locally by forge</span>
+  <span class="meta">%s</span>
 </header>
 <main><div id="root"></div></main>
 <script type="module" src="/app.js"></script>
@@ -93,6 +93,19 @@ func (p Payload) blobsJSON() string {
 		return `{"base":null,"head":null}`
 	}
 	return string(b)
+}
+
+// metaLine states what the page is showing: which handler produced the diff,
+// and — when the caller compares anything other than the obvious — which two
+// versions the blobs come from. The page can be pointed at any pair of
+// revisions, so leaving the header to imply "working tree" would misreport what
+// the reader is looking at.
+func (p Payload) metaLine() string {
+	meta := "handler: " + p.HandlerID
+	if p.Compare != "" {
+		meta += " · comparing " + p.Compare
+	}
+	return meta + " · computed locally by forge"
 }
 
 func htmlEscape(s string) string { return html.EscapeString(s) }

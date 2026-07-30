@@ -68,6 +68,29 @@ func TestRoutes(t *testing.T) {
 	}
 }
 
+// The page can be pointed at any pair of revisions, so its header has to say
+// which two versions it is showing — a reader who cannot tell whether they are
+// looking at uncommitted work or at a historical commit cannot trust the view.
+func TestIndexMetaNamesWhatIsCompared(t *testing.T) {
+	p := newTestPayload(t)
+	p.Compare = "HEAD~1 → the working tree"
+	body, _ := io.ReadAll(doGet(t, withCSP(p.handler()), "/").Body)
+	if !strings.Contains(string(body), "comparing HEAD~1 → the working tree") {
+		t.Errorf("header does not say what is compared; got:\n%s", string(body))
+	}
+
+	// With nothing to say, the header stays as it was.
+	p.Compare = ""
+	body, _ = io.ReadAll(doGet(t, withCSP(p.handler()), "/").Body)
+	got := string(body)
+	if !strings.Contains(got, "handler: "+p.HandlerID+" · computed locally by forge") {
+		t.Errorf("unexpected header without a comparison; got:\n%s", got)
+	}
+	if strings.Contains(got, "comparing") {
+		t.Errorf("header invented a comparison; got:\n%s", got)
+	}
+}
+
 func TestCSPHeaderPresent(t *testing.T) {
 	p := newTestPayload(t)
 	h := withCSP(p.handler())
