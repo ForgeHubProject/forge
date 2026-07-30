@@ -29,13 +29,13 @@ type statusEntry struct {
 
 // status reports the working tree the way forge status does, minus the colours:
 // what changed, and which of it a handler can explain.
-func (s *server) status(_ context.Context, _ *mcp.CallToolRequest, _ noArgs) (*mcp.CallToolResult, statusOut, error) {
+func (s *server) status(ctx context.Context, _ *mcp.CallToolRequest, _ noArgs) (*mcp.CallToolResult, statusOut, error) {
 	out := statusOut{Root: s.root, Entries: []statusEntry{}}
 
-	if head, err := forgerepo.GitOutput(s.root, "rev-parse", "HEAD"); err == nil {
+	if head, err := forgerepo.GitOutput(ctx, s.root, "rev-parse", "HEAD"); err == nil {
 		out.Head = strings.TrimSpace(string(head))
 	}
-	if branch, err := forgerepo.GitOutput(s.root, "symbolic-ref", "--short", "-q", "HEAD"); err == nil {
+	if branch, err := forgerepo.GitOutput(ctx, s.root, "symbolic-ref", "--short", "-q", "HEAD"); err == nil {
 		out.Branch = strings.TrimSpace(string(branch))
 	}
 	out.Detached = out.Branch == "" && out.Head != ""
@@ -44,12 +44,12 @@ func (s *server) status(_ context.Context, _ *mcp.CallToolRequest, _ noArgs) (*m
 	// status defers to it for untracked files: the whole ignore stack, and git's
 	// collapsing of a wholly-untracked directory to one entry — which is also what
 	// keeps this response bounded in a tree full of new files.
-	raw, err := forgerepo.GitOutput(s.root, "status", "--porcelain=v1", "-z")
+	raw, err := forgerepo.GitOutput(ctx, s.root, "status", "--porcelain=v1", "-z")
 	if err != nil {
 		return nil, out, err
 	}
 
-	reg := forgerepo.Registry(s.root)
+	reg := forgerepo.Registry(ctx, s.root)
 	entries := parsePorcelain(string(raw))
 	for i := range entries {
 		entries[i].HandlerID = handlerID(reg, entries[i].Path)

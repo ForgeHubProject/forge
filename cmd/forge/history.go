@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -48,12 +49,12 @@ summarised with git's own line counts. Paths given filter the listing.`,
 
 func runShow(cmd *cobra.Command, args []string) error {
 	repoDir := forgerepo.FindRoot()
-	if _, err := forgerepo.GitOutput(repoDir, "rev-parse", "--git-dir"); err != nil {
+	if _, err := forgerepo.GitOutput(context.Background(), repoDir, "rev-parse", "--git-dir"); err != nil {
 		return fmt.Errorf("not a git repository")
 	}
 
 	dashAt := cmd.ArgsLenAtDash()
-	revs, rawPaths, err := forgerepo.SplitRevsAndPaths(repoDir, args, dashAt)
+	revs, rawPaths, err := forgerepo.SplitRevsAndPaths(context.Background(), repoDir, args, dashAt)
 	if err != nil {
 		return err
 	}
@@ -67,7 +68,7 @@ func runShow(cmd *cobra.Command, args []string) error {
 	if len(revs) != 1 {
 		return fmt.Errorf("forge show takes exactly one revision")
 	}
-	commit, err := forgerepo.ResolveRev(repoDir, revs[0])
+	commit, err := forgerepo.ResolveRev(context.Background(), repoDir, revs[0])
 	if err != nil {
 		return err
 	}
@@ -78,11 +79,11 @@ func runShow(cmd *cobra.Command, args []string) error {
 
 	head := forgerepo.RevisionSource(revs[0], commit)
 	base := forgerepo.EmptySource()
-	if parent, err := forgerepo.ResolveRev(repoDir, commit+"^1"); err == nil {
+	if parent, err := forgerepo.ResolveRev(context.Background(), repoDir, commit+"^1"); err == nil {
 		base = forgerepo.RevisionSource(revs[0]+"^", parent)
 	}
 
-	files, err := forgerepo.ChangedPaths(repoDir, base, head, paths)
+	files, err := forgerepo.ChangedPaths(context.Background(), repoDir, base, head, paths)
 	if err != nil {
 		return err
 	}
@@ -112,7 +113,7 @@ func runShow(cmd *cobra.Command, args []string) error {
 // showFile renders one file's entry in a commit: the handler's change tree where
 // there is one, git's line counts otherwise.
 func showFile(repoDir string, reg *handler.Registry, path string, base, head forgerepo.Source) error {
-	fc, err := forgerepo.CompareFile(repoDir, reg, path, base, head)
+	fc, err := forgerepo.CompareFile(context.Background(), repoDir, reg, path, base, head)
 	if err != nil {
 		return err
 	}
@@ -120,7 +121,7 @@ func showFile(repoDir string, reg *handler.Registry, path string, base, head for
 	case !fc.BaseFound && !fc.HeadFound:
 		fmt.Printf("  %-46s not in %s or %s\n", path, base, head)
 	case !fc.Semantic:
-		fmt.Printf("  %-46s %s  %s\n", path, forgerepo.TextChangeSummary(repoDir, base, head, path), handlerLabel(path, reg))
+		fmt.Printf("  %-46s %s  %s\n", path, forgerepo.TextChangeSummary(context.Background(), repoDir, base, head, path), handlerLabel(path, reg))
 	case len(fc.Diff.Changes) == 0:
 		fmt.Printf("  %-46s no semantic changes  %s\n", path, handlerLabel(path, reg))
 	default:

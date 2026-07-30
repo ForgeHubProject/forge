@@ -260,10 +260,21 @@ handler id and the build that produced it.
 
 Responses are paginated on purpose. A change tree can be enormous, so a call
 returns a summary plus a capped, depth-first slice of the tree and
-`truncated{returned, total, hint}`; the hint names the paths to pass back as
-`at`, and `kinds` narrows to the changes being looked for. A response that does
+`truncated{returned, total, hint}`. The hint names the cursors that reach what was
+withheld — `at` for a subtree the cap cut off, `after` for the rest of a level
+that was wider than the cap — and both take a path from the response being read,
+so no capped response is a dead end and no answer needs the whole tree fetched to
+be complete. `kinds` narrows to the changes being looked for. A response that does
 not say it was truncated was not — silent truncation would let an agent conclude
 a change set was complete when it was not.
+
+What forge can answer here is reported the way the answer is computed. A
+repository that lists no formats has not opted out of everything: an empty opt-in
+list filters nothing, so every installed handler answers, and `forge_formats` and
+`forge_handler_for` say so rather than promising a text fallback that will not
+happen. A call is bounded, too — a client's cancellation and the server's own
+deadline both reach the handler subprocess, so a runaway handler is killed with
+the call it was spawned for.
 
 The repository is the one the command was started in, resolved once; every path
 an agent passes is resolved against that root and refused if it escapes. The

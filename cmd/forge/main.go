@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -41,9 +42,11 @@ func main() {
 }
 
 // defaultRegistry builds the handler registry for the repository the command
-// was run in.
+// was run in. A command's handler subprocesses are bound to no context narrower
+// than the process: they live as long as the command does, and a terminal's
+// interrupt reaches them through the process group.
 func defaultRegistry() *handler.Registry {
-	return forgerepo.Registry(forgerepo.FindRoot())
+	return forgerepo.Registry(context.Background(), forgerepo.FindRoot())
 }
 
 func rootCmd() *cobra.Command {
@@ -876,12 +879,12 @@ func runDiff(cmd *cobra.Command, args []string) error {
 
 	reg := defaultRegistry()
 
-	args, dashAt := forgerepo.ExpandRevRange(repoDir, args, cmd.ArgsLenAtDash())
-	revs, rawPaths, err := forgerepo.SplitRevsAndPaths(repoDir, args, dashAt)
+	args, dashAt := forgerepo.ExpandRevRange(context.Background(), repoDir, args, cmd.ArgsLenAtDash())
+	revs, rawPaths, err := forgerepo.SplitRevsAndPaths(context.Background(), repoDir, args, dashAt)
 	if err != nil {
 		return err
 	}
-	base, head, err := forgerepo.DiffSources(repoDir, revs)
+	base, head, err := forgerepo.DiffSources(context.Background(), repoDir, revs)
 	if err != nil {
 		return err
 	}
@@ -899,7 +902,7 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(paths) > 0 {
-		files, err := forgerepo.ComparePaths(repoDir, base, head, paths)
+		files, err := forgerepo.ComparePaths(context.Background(), repoDir, base, head, paths)
 		if err != nil {
 			return err
 		}
@@ -914,7 +917,7 @@ func runDiff(cmd *cobra.Command, args []string) error {
 		// HEAD does not — untracked work a revision listing cannot report.
 		changed, err = repo.ChangedFiles()
 	} else {
-		changed, err = forgerepo.ChangedPaths(repoDir, base, head, nil)
+		changed, err = forgerepo.ChangedPaths(context.Background(), repoDir, base, head, nil)
 	}
 	if err != nil {
 		return err
@@ -940,7 +943,7 @@ func cleanPath(p string) string {
 // tree, or git's own text diff for a path no handler claims. An error is the
 // caller's to report — one unreadable path does not end a multi-path diff.
 func diffFile(repoDir string, reg *handler.Registry, path string, base, head forgerepo.Source) error {
-	fc, err := forgerepo.CompareFile(repoDir, reg, path, base, head)
+	fc, err := forgerepo.CompareFile(context.Background(), repoDir, reg, path, base, head)
 	if err != nil {
 		return err
 	}
@@ -963,7 +966,7 @@ func diffFile(repoDir string, reg *handler.Registry, path string, base, head for
 // diffFileWeb computes the semantic diff locally and serves it to a loopback
 // browser page rendered by the format's FHR renderer bundle (SPEC-RENDERING §3b).
 func diffFileWeb(repoDir string, reg *handler.Registry, path string, base, head forgerepo.Source, openBrowser bool) error {
-	fc, err := forgerepo.CompareFile(repoDir, reg, path, base, head)
+	fc, err := forgerepo.CompareFile(context.Background(), repoDir, reg, path, base, head)
 	if err != nil {
 		return err
 	}
