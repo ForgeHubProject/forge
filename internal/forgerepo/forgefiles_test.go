@@ -3,6 +3,7 @@ package forgerepo
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -148,6 +149,47 @@ func TestForgeFormatsIgnorePreservesIncludedAndComments(t *testing.T) {
 	if LoadIgnoredFormats(repo)[".tif"] {
 		t.Fatal(".tif should be gone after remove")
 	}
+}
+
+// The legacy-layout note is remembered in package state, and these files are
+// read on the path of every command and every request. One process answering
+// several requests at once reads them from several goroutines, so the remembering
+// must be safe: a plain map written from two of them aborts the process, taking
+// a whole session with it and returning no error to anyone. Run with -race to
+// see the read and the write; without it, the runtime's own concurrent-write
+// check is what fires.
+func TestPerRepoFilesReadSafelyFromManyGoroutines(t *testing.T) {
+	repo := t.TempDir()
+	writeFileT(t, filepath.Join(repo, ".forge-formats"), ".unit\n!.ignored\n")
+	writeFileT(t, filepath.Join(repo, ".forge-handlers"), `{"unit-stub":"20240115-abc1234"}`)
+
+	// The note fires once per process, and the first burst of readers is the
+	// window in which several of them all find it unsaid.
+	legacyFileWarned.Delete(".forge-formats")
+	legacyFileWarned.Delete(".forge-handlers")
+
+	// Released together, so the readers reach the note at the same moment rather
+	// than in the order they were started.
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for range 64 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if !LoadForgeFormats(repo)[".unit"] {
+				t.Error("a concurrent read must still see the legacy format list")
+			}
+			if !LoadIgnoredFormats(repo)[".ignored"] {
+				t.Error("a concurrent read must still see the legacy ignore list")
+			}
+			if pin := LoadForgeHandlers(repo)["unit-stub"]; pin == nil {
+				t.Error("a concurrent read must still see the legacy lockfile")
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
 }
 
 func TestForgeHandlersRoundtripAndMigration(t *testing.T) {
