@@ -117,6 +117,68 @@ func newHistoryRepo(t *testing.T) string {
 	return repo
 }
 
+// newRenameRepo builds a repo whose second commit is nothing but two renames —
+// one handled file, one plain — with not a byte of either file changed. It
+// returns the repo root and chdirs into it.
+func newRenameRepo(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the stub handler is a POSIX shell script")
+	}
+	installStubHandler(t)
+
+	repo := t.TempDir()
+	gitT(t, repo, "init", "-b", "main", repo)
+	gitT(t, repo, "config", "user.email", "t@example.com")
+	gitT(t, repo, "config", "user.name", "t")
+
+	writeFileT(t, filepath.Join(repo, ".forge", "formats"), ".unit\n")
+	writeFileT(t, filepath.Join(repo, "before.unit"), "v1")
+	writeFileT(t, filepath.Join(repo, "notes.txt"), "line1\n")
+	gitT(t, repo, "add", "-A")
+	gitT(t, repo, "commit", "-m", "one")
+
+	gitT(t, repo, "mv", "before.unit", "after.unit")
+	gitT(t, repo, "mv", "notes.txt", "moved.txt")
+	gitT(t, repo, "commit", "-m", "two")
+
+	t.Chdir(repo)
+	return repo
+}
+
+// A rename is two paths, and forge compares one path at a time: a rename git
+// collapsed into a single record naming its destination was compared against a
+// base side that has no such path and so reported as a file created out of
+// nothing, however unchanged its bytes, while the source it came from was never
+// listed and so never reported gone.
+func TestRenameReportsBothPathsAndNoInventedContent(t *testing.T) {
+	newRenameRepo(t)
+
+	out, err := runForge(t, showCmd(), "HEAD")
+	if err != nil {
+		t.Fatalf("forge show HEAD: %v\n%s", err, out)
+	}
+	mustContain(t, out,
+		"4 files changed", // both halves of both renames
+		"before.unit", "after.unit",
+		"- [payload] "+b64("v1"), // the handled file left one path ...
+		"+ [payload] "+b64("v1"), // ... and arrived at the other, unchanged
+		"notes.txt", "moved.txt",
+		"+0 -1", "+1 -0", // what git counts for the plain file, both ways
+	)
+	mustNotContain(t, out, "not in")
+
+	out, err = runForge(t, diffCmd(), "HEAD~1", "HEAD")
+	if err != nil {
+		t.Fatalf("forge diff HEAD~1 HEAD: %v\n%s", err, out)
+	}
+	mustContain(t, out,
+		"- [payload] "+b64("v1"), "+ [payload] "+b64("v1"),
+		"deleted file", "new file", // git's own text diff, for the path it claims
+	)
+	mustNotContain(t, out, "not in")
+}
+
 // newNestedRepo makes a repository inside another and returns the two commits it
 // holds. Its objects live in its own store — which is what makes a gitlink
 // pointing at them unreadable as an object from the outer repository, exactly as
