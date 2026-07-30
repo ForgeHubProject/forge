@@ -28,6 +28,14 @@ if [ -z "$head" ]; then kind=removed; fi
 printf '{"version":"1.0","format":"unit-stub","changes":[{"path":"payload","kind":"%s","label":"payload","before":"%s","after":"%s"}]}\n' "$kind" "$base" "$head"
 `
 
+// failingHandlerScript is a handler binary that refuses every diff, as a real one
+// does when it cannot parse the bytes it was handed.
+const failingHandlerScript = `#!/bin/sh
+cat >/dev/null
+echo '{"error":"cannot parse"}' >&2
+exit 1
+`
+
 func b64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 
 // installStubHandler puts a handler for ".unit" under a temp HOME, so the
@@ -45,6 +53,30 @@ func installStubHandler(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFileT(t, binary+".json", `{"id":"unit-stub","build":"test","formats":[".unit"]}`)
+}
+
+// newBrokenRepo builds on newHistoryRepo with a second handler, for ".broken",
+// that fails on every file it is handed. It commits one such file and leaves both
+// it and the handled file changed in the working tree, so a report covers a path
+// that fails and a path that does not. It returns the repo root.
+func newBrokenRepo(t *testing.T) string {
+	t.Helper()
+	repo := newHistoryRepo(t)
+
+	plugins := filepath.Join(os.Getenv("HOME"), ".forge", "plugins")
+	binary := filepath.Join(plugins, "forge-handler-unit-broken")
+	if err := os.WriteFile(binary, []byte(failingHandlerScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeFileT(t, binary+".json", `{"id":"unit-broken","build":"test","formats":[".broken"]}`)
+
+	writeFileT(t, filepath.Join(repo, ".forge", "formats"), ".unit\n.broken\n")
+	writeFileT(t, filepath.Join(repo, "asset.broken"), "v1")
+	gitT(t, repo, "add", "-A")
+	gitT(t, repo, "commit", "-m", "three")
+	writeFileT(t, filepath.Join(repo, "asset.broken"), "v2")
+	writeFileT(t, filepath.Join(repo, "asset.unit"), "v4")
+	return repo
 }
 
 // newHistoryRepo builds a repo with two commits over one handled file and one
@@ -365,6 +397,48 @@ func TestDiffWebAcceptsRevisions(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "exactly one file") {
 		t.Fatalf("--web with no path should say it needs one file, got: %v", err)
 	}
+}
+
+// A path the caller named whose diff failed is the command's failure: anything
+// shelling out to forge and reading the status would otherwise take a diff that
+// was never produced for a clean one.
+func TestDiffFailedPathReachesTheExitStatus(t *testing.T) {
+	newBrokenRepo(t)
+
+	for _, args := range [][]string{
+		{"asset.broken"},
+		{"HEAD", "--", "asset.broken"},
+		{"HEAD~1", "HEAD", "--", "asset.broken"},
+		{"--", "."}, // a directory that expands onto the failing path
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			out, err := runForge(t, diffCmd(), args...)
+			if err == nil {
+				t.Fatalf("a failed diff must not exit zero; got:\n%s", out)
+			}
+			mustContain(t, out, "asset.broken")
+		})
+	}
+
+	// A survey of the whole working tree still reports per file and exits zero, as
+	// it did before forge diff took revisions.
+	out, err := runForge(t, diffCmd())
+	if err != nil {
+		t.Fatalf("forge diff over the whole tree must still exit zero: %v\n%s", err, out)
+	}
+	mustContain(t, out, "asset.broken", b64("v4")) // the failure named, the rest still rendered
+}
+
+// forge show reports per file too, and for the same reason must not call a
+// report with a missing file a success.
+func TestShowFailedPathReachesTheExitStatus(t *testing.T) {
+	newBrokenRepo(t)
+
+	out, err := runForge(t, showCmd(), "HEAD")
+	if err == nil {
+		t.Fatalf("a failed diff must not exit zero; got:\n%s", out)
+	}
+	mustContain(t, out, "asset.broken")
 }
 
 func TestShowMultiFileCommit(t *testing.T) {

@@ -336,6 +336,25 @@ func compareFile(repoDir string, reg *handler.Registry, path string, base, head 
 	return fc, nil
 }
 
+// renderPaths renders every path, reporting one that fails and carrying on, so a
+// single file forge cannot read does not cost the rest of the report. The
+// failures also reach the returned error and so the exit status: a caller that
+// shells out to forge and reads the status has no other way to learn that a
+// comparison it asked for was never produced.
+func renderPaths(paths []string, render func(path string) error) error {
+	var failed []string
+	for _, p := range paths {
+		if err := render(p); err != nil {
+			fmt.Fprintf(os.Stderr, "forge: %s: %v\n", p, err)
+			failed = append(failed, p)
+		}
+	}
+	if len(failed) == 0 {
+		return nil
+	}
+	return fmt.Errorf("could not compare: %s", strings.Join(failed, ", "))
+}
+
 // handlerFormat names the handler that resolved, "unknown" if it does not say.
 func handlerFormat(h handler.ForgeHandler) string {
 	if n, ok := h.(handler.Namer); ok {
@@ -495,12 +514,9 @@ func runShow(cmd *cobra.Command, args []string) error {
 	fmt.Printf("%d %s changed\n", len(files), noun)
 
 	reg := defaultRegistry()
-	for _, p := range files {
-		if err := showFile(repoDir, reg, p, base, head); err != nil {
-			fmt.Fprintf(os.Stderr, "forge: %s: %v\n", p, err)
-		}
-	}
-	return nil
+	return renderPaths(files, func(p string) error {
+		return showFile(repoDir, reg, p, base, head)
+	})
 }
 
 // showFile renders one file's entry in a commit: the handler's change tree where
