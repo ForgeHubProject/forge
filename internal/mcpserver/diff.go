@@ -115,7 +115,7 @@ func (s *server) semanticDiff(ctx context.Context, _ *mcp.CallToolRequest, in se
 
 	summary := summarize(changes, level, max)
 	out.Summary = &summary
-	out.Changes, out.Truncated = renderTree(changes, level, max)
+	out.Changes, out.Truncated, _ = renderTree(changes, level, max)
 	if summary.Total == 0 {
 		out.Note = "the handler found no semantic change here"
 	}

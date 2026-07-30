@@ -27,10 +27,19 @@ import (
 // A repository that lists no formats at all gets every installed handler: the
 // opt-in list is a filter, and an empty filter excludes nothing. Anything
 // reporting on what forge can answer here has to read it the same way.
+//
+// An extension the repository has explicitly ignored is the one thing that
+// filter cannot decide, and it is registered ahead of the handlers so the ignore
+// wins: a list holding nothing but ignores opts nothing in, so the empty-filter
+// rule would otherwise hand every one of those extensions to a handler — the
+// exact opposite of what writing them down said.
 func Registry(ctx context.Context, repoDir string) *handler.Registry {
 	reg := handler.NewRegistry()
 
 	forgeFormats := LoadForgeFormats(repoDir)
+	if ignored := LoadIgnoredFormats(repoDir); len(ignored) > 0 {
+		reg.Register(ignoredFormats{Handler: text.New(), exts: ignored})
+	}
 
 	for _, meta := range fhr.LoadInstalledHandlers() {
 		binary := fhr.InstalledHandlerBinary(meta.ID)
@@ -55,6 +64,19 @@ func Registry(ctx context.Context, repoDir string) *handler.Registry {
 
 	reg.Register(text.New())
 	return reg
+}
+
+// ignoredFormats is the text catch-all narrowed to the extensions a repository
+// has marked as having no handler. Registered first, it makes the ignore final:
+// resolution stops at the first match, so nothing installed behind it is ever
+// asked about one of these paths.
+type ignoredFormats struct {
+	*text.Handler
+	exts map[string]bool
+}
+
+func (h ignoredFormats) Match(path string) bool {
+	return h.exts[strings.ToLower(filepath.Ext(path))]
 }
 
 // FindRoot returns the top of the repository the process is in, or "." where

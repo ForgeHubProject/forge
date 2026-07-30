@@ -21,7 +21,7 @@ type handlerForOut struct {
 	Path        string        `json:"path"`
 	Extension   string        `json:"extension" jsonschema:"the extension the answer is really about, lower-cased"`
 	HandlerID   string        `json:"handlerId,omitempty" jsonschema:"the handler that claims this extension, absent when none is known here"`
-	OptedIn     bool          `json:"optedIn" jsonschema:"true when this repository lists the extension in .forge/formats"`
+	OptedIn     bool          `json:"optedIn" jsonschema:"true when this repository opts the extension in in .forge/formats"`
 	Ignored     bool          `json:"ignored" jsonschema:"true when this repository has deliberately marked the extension as having no handler"`
 	Installed   bool          `json:"installed" jsonschema:"true when the handler binary is present on this machine"`
 	Build       string        `json:"build,omitempty" jsonschema:"build of the installed handler"`
@@ -109,7 +109,7 @@ func (s *server) handlerFor(ctx context.Context, _ *mcp.CallToolRequest, in hand
 	// agent away from an answer forge can give.
 	switch {
 	case out.Semantic && !out.OptedIn:
-		out.Note = fmt.Sprintf("%s is not listed in this repository's .forge/formats, but the repository lists no formats at all — an empty list filters nothing, so this handler is what answers for it", ext)
+		out.Note = fmt.Sprintf("%s is not opted in in this repository's .forge/formats, but the repository opts no format in at all — an empty opt-in list filters nothing, so this handler is what answers for it", ext)
 	case !out.Semantic && out.Ignored:
 		out.Note = fmt.Sprintf("this repository has deliberately marked %s as having no handler, so the semantic tools leave it to git's text diff", ext)
 	case !out.Semantic:
@@ -147,7 +147,7 @@ func installedFor(ext string) (fhr.InstalledMeta, bool) {
 
 type formatsOut struct {
 	Root      string        `json:"root"`
-	OptInList bool          `json:"optInList" jsonschema:"true when this repository lists formats; false means it lists none, and an empty list filters nothing, so every installed handler answers here"`
+	OptInList bool          `json:"optInList" jsonschema:"true when this repository opts any format in; false means it opts none in, and an empty opt-in list filters nothing, so every installed handler answers here — except for an extension listed as ignored, which is refused a handler either way"`
 	Formats   []formatEntry `json:"formats" jsonschema:"one entry per extension forge answers about here or has been told not to"`
 	Note      string        `json:"note,omitempty"`
 }
@@ -180,7 +180,8 @@ func (s *server) formats(ctx context.Context, _ *mcp.CallToolRequest, _ noArgs) 
 	for ext := range included {
 		states[ext] = "opted-in"
 	}
-	for ext := range forgerepo.LoadIgnoredFormats(s.root) {
+	ignored := forgerepo.LoadIgnoredFormats(s.root)
+	for ext := range ignored {
 		states[ext] = "ignored"
 	}
 	out.OptInList = len(included) > 0
@@ -193,8 +194,15 @@ func (s *server) formats(ctx context.Context, _ *mcp.CallToolRequest, _ noArgs) 
 				}
 			}
 		}
-		out.Note = "this repository lists no formats, so the opt-in list filters nothing: every installed handler answers here, and the extensions below are the ones they claim. " +
+		// A file holding nothing but ignores opts nothing in, but it is not a
+		// repository that has said nothing: saying so would contradict the ignored
+		// entries listed in this same response.
+		out.Note = "this repository opts no format in, so the opt-in list filters nothing: every installed handler answers here, and the extensions below are the ones they claim. " +
 			"Listing the formats this repository cares about is a terminal command."
+		if len(ignored) > 0 {
+			out.Note = fmt.Sprintf("this repository opts no format in — it lists %d extension(s), all of them ignored — so the opt-in list filters nothing: every installed handler answers here except for the ignored extensions, which are left to git. "+
+				"Listing the formats this repository cares about is a terminal command.", len(ignored))
+		}
 	}
 	if len(states) == 0 {
 		out.Note = "this repository lists no formats and no handler is installed on this machine, so every path falls back to git's text diff. " +

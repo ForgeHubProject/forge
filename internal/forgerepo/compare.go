@@ -273,7 +273,11 @@ func SourceEntry(ctx context.Context, repoDir string, src Source, path string) s
 	}
 	switch src.Kind {
 	case SourceWorktree:
-		st, err := os.Stat(filepath.Join(repoDir, filepath.FromSlash(path)))
+		// Lstat, not Stat: a symlink is an entry in its own right — git records one
+		// as a blob holding the path it names — and following it here would report
+		// the type of a file the repository does not contain, one a committed link
+		// can point anywhere.
+		st, err := os.Lstat(filepath.Join(repoDir, filepath.FromSlash(path)))
 		switch {
 		case err != nil:
 			return ""
@@ -314,7 +318,20 @@ func blobAt(ctx context.Context, repoDir string, src Source, path, entry string)
 		return nil, false, nil
 	}
 	if src.Kind == SourceWorktree {
-		data, err := os.ReadFile(filepath.Join(repoDir, filepath.FromSlash(path)))
+		full := filepath.Join(repoDir, filepath.FromSlash(path))
+		// A symlink's content is the path it names, which is what git committed for
+		// it and so what the other side of the comparison holds. Reading through it
+		// would compare a file the repository does not contain against the link that
+		// names it — two sides disagreeing about what the file even is — and would
+		// let repository content, not a path argument, decide what gets read.
+		if st, err := os.Lstat(full); err == nil && st.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(full)
+			if err != nil {
+				return nil, false, fmt.Errorf("reading %s: %w", path, err)
+			}
+			return []byte(target), true, nil
+		}
+		data, err := os.ReadFile(full)
 		if err != nil {
 			return nil, false, fmt.Errorf("reading %s: %w", path, err)
 		}
