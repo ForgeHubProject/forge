@@ -395,6 +395,46 @@ func TestDiffRefusesMoreThanTwoRevisions(t *testing.T) {
 	}
 }
 
+// A revision that arrives after a path is refused too, in every position: kept
+// as a path the working tree lacks it would compare only the arguments before it
+// — a pair the caller did not ask for — and report the revision forge resolves as
+// missing, at exit zero, where git refuses outright. "--" is how a caller says a
+// revision's name was meant as a path.
+func TestRefusesARevisionAfterAPath(t *testing.T) {
+	newHistoryRepo(t)
+
+	for _, args := range [][]string{
+		{"notes.txt", "HEAD~1"},
+		{"HEAD~1", "notes.txt", "HEAD"},
+		{"HEAD~1", "HEAD", "notes.txt", "HEAD~1"},
+		{"--web", "--no-open", "notes.txt", "HEAD~1"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			out, err := runForge(t, diffCmd(), args...)
+			if err == nil || !strings.Contains(err.Error(), "revisions must come before paths") {
+				t.Fatalf("expected a refusal, got: %v\n%s", err, out)
+			}
+			mustNotContain(t, out, "payload", "--- a/", "not in")
+		})
+	}
+
+	// forge show reads its arguments the same way, and dropped the trailing
+	// revision without even a line to say it had.
+	out, err := runForge(t, showCmd(), "HEAD", "notes.txt", "HEAD~1")
+	if err == nil || !strings.Contains(err.Error(), "revisions must come before paths") {
+		t.Fatalf("expected forge show to refuse, got: %v\n%s", err, out)
+	}
+	mustNotContain(t, out, "payload", "--- a/")
+
+	// After the separator the same argument is the path it was said to be, and
+	// absent from both sides is reported rather than refused.
+	out, err = runForge(t, diffCmd(), "--", "notes.txt", "HEAD~1")
+	if err != nil {
+		t.Fatalf("forge diff -- notes.txt HEAD~1: %v\n%s", err, out)
+	}
+	mustContain(t, out, "HEAD~1: not in HEAD or the working tree")
+}
+
 // A gitlink is an entry whose object this repository does not have — it lives in
 // the nested repository's own store — so it cannot be read as a blob and no
 // handler can be handed its bytes. It is present all the same, on both sides, and
@@ -713,6 +753,15 @@ func TestSplitRevsAndPaths(t *testing.T) {
 		{"absent path after the separator", []string{"ghost.unit"}, 0, nil, []string{"ghost.unit"}},
 		{"absent path after two revisions", []string{"HEAD~1", "HEAD", "ghost.unit"}, -1,
 			[]string{"HEAD~1", "HEAD"}, []string{"ghost.unit"}},
+		{"absent path after a path", []string{"notes.txt", "ghost.unit"}, -1,
+			nil, []string{"notes.txt", "ghost.unit"}},
+		// A name on disk after the paths have begun is a path, with nothing left
+		// for "--" to settle, even where it is also a branch.
+		{"a branch that is also a file, after a path", []string{"notes.txt", "asset.unit"}, -1,
+			nil, []string{"notes.txt", "asset.unit"}},
+		// The separator is what says a revision's name was meant as a path.
+		{"a revision named as a path after the separator", []string{"notes.txt", "HEAD"}, 0,
+			nil, []string{"notes.txt", "HEAD"}},
 		// Past the second revision a name on disk is a path with nothing left for
 		// "--" to settle, so one that is also a branch needs no separator there.
 		{"a branch that is also a file, after two revisions", []string{"HEAD~1", "HEAD", "asset.unit"}, -1,
@@ -755,6 +804,13 @@ func TestSplitRevsAndPaths(t *testing.T) {
 		{"both a revision and a file", []string{"asset.unit"}},
 		{"neither a revision nor a file", []string{"no-such-name"}},
 		{"a bad head revision", []string{"HEAD~1", "no-such-name"}},
+		// A revision after the paths have begun is a revision written in the wrong
+		// place or a path the working tree lacks; absorbing it as an absent path
+		// would compare the arguments before it and report success.
+		{"a revision after a path", []string{"notes.txt", "HEAD~1"}},
+		{"a revision after a revision and a path", []string{"HEAD~1", "notes.txt", "HEAD"}},
+		{"a revision after two revisions and a path", []string{"HEAD~1", "HEAD", "notes.txt", "HEAD~1"}},
+		{"a revision after an absent path", []string{"HEAD~1", "HEAD", "ghost.unit", "HEAD~1"}},
 	} {
 		if revs, paths, err := splitRevsAndPaths(repo, c.args, -1); err == nil {
 			t.Errorf("%s: %v must be refused, got revs %v paths %v", c.name, c.args, revs, paths)
