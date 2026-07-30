@@ -117,6 +117,74 @@ func newHistoryRepo(t *testing.T) string {
 	return repo
 }
 
+// newNestedRepo makes a repository inside another and returns the two commits it
+// holds. Its objects live in its own store — which is what makes a gitlink
+// pointing at them unreadable as an object from the outer repository, exactly as
+// a submodule's are.
+func newNestedRepo(t *testing.T, path string) (first, second string) {
+	t.Helper()
+	gitT(t, filepath.Dir(path), "init", "-b", "main", path)
+	gitT(t, path, "config", "user.email", "t@example.com")
+	gitT(t, path, "config", "user.name", "t")
+
+	writeFileT(t, filepath.Join(path, "f.txt"), "v1")
+	gitT(t, path, "add", "-A")
+	gitT(t, path, "commit", "-m", "nested one")
+	first = gitOutputT(t, path, "rev-parse", "HEAD")
+
+	writeFileT(t, filepath.Join(path, "f.txt"), "v2")
+	gitT(t, path, "add", "-A")
+	gitT(t, path, "commit", "-m", "nested two")
+	second = gitOutputT(t, path, "rev-parse", "HEAD")
+	return first, second
+}
+
+// newGitlinkRepo builds a repo whose last two commits pin two nested
+// repositories — the gitlink entry git records a submodule as — at one commit and
+// then the next, and leaves both nested checkouts back at the first, so the
+// pointers differ from HEAD in the working tree too. One gitlink is named for a
+// format the handler claims, to cover a path that resolves to a handler with no
+// bytes to hand it. It returns the repo root and chdirs into it.
+func newGitlinkRepo(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the stub handler is a POSIX shell script")
+	}
+	installStubHandler(t)
+
+	repo := t.TempDir()
+	gitT(t, repo, "init", "-b", "main", repo)
+	gitT(t, repo, "config", "user.email", "t@example.com")
+	gitT(t, repo, "config", "user.name", "t")
+	writeFileT(t, filepath.Join(repo, ".forge", "formats"), ".unit\n")
+	gitT(t, repo, "add", "-A")
+	gitT(t, repo, "commit", "-m", "one")
+
+	links := []struct{ path, first, second string }{{path: "inner"}, {path: "pinned.unit"}}
+	for i, l := range links {
+		links[i].first, links[i].second = newNestedRepo(t, filepath.Join(repo, l.path))
+	}
+	// The entries are written straight into the index: `git submodule add` would
+	// need a transport to clone the nested repository through, and the entry is
+	// all a gitlink amounts to here.
+	for _, bump := range []bool{false, true} {
+		for _, l := range links {
+			commit := l.first
+			if bump {
+				commit = l.second
+			}
+			gitT(t, repo, "update-index", "--add", "--cacheinfo", "160000,"+commit+","+l.path)
+		}
+		gitT(t, repo, "commit", "-m", "pin the nested repositories")
+	}
+	for _, l := range links {
+		gitT(t, filepath.Join(repo, l.path), "checkout", "--detach", l.first)
+	}
+
+	t.Chdir(repo)
+	return repo
+}
+
 // newEmptyRepo builds a repository with no commits: the handler is installed and
 // one handled file is on disk, but there is no HEAD for anything to compare
 // against. It returns the repo root and chdirs into it.
@@ -257,6 +325,53 @@ func TestDiffRefusesMoreThanTwoRevisions(t *testing.T) {
 			mustNotContain(t, out, "payload", "--- a/")
 		})
 	}
+}
+
+// A gitlink is an entry whose object this repository does not have — it lives in
+// the nested repository's own store — so it cannot be read as a blob and no
+// handler can be handed its bytes. It is present all the same, on both sides, and
+// git renders the pointer change: calling it absent instead dropped every such
+// entry out of the report while exiting zero.
+func TestDiffGitlinkIsPresentAndDiffedByGit(t *testing.T) {
+	repo := newGitlinkRepo(t)
+	head := gitOutputT(t, repo, "rev-parse", "HEAD")
+
+	if got := sourceEntry(repo, revisionSource("HEAD", head), "inner"); got != "commit" {
+		t.Errorf("sourceEntry for a gitlink = %q, want \"commit\"", got)
+	}
+
+	for _, path := range []string{"inner", "pinned.unit"} {
+		t.Run(path, func(t *testing.T) {
+			basePin := gitOutputT(t, repo, "rev-parse", "HEAD~1:"+path)
+			headPin := gitOutputT(t, repo, "rev-parse", "HEAD:"+path)
+
+			out, err := runForge(t, diffCmd(), "HEAD~1", "HEAD", path)
+			if err != nil {
+				t.Fatalf("forge diff HEAD~1 HEAD %s: %v\n%s", path, err, out)
+			}
+			mustContain(t, out, "Subproject commit "+basePin, "Subproject commit "+headPin)
+			// No bytes reached a handler, so nothing may be reported as semantics.
+			mustNotContain(t, out, "not in", "payload")
+
+			// Against the working tree, where the nested checkout is back at the
+			// commit the parent pinned.
+			out, err = runForge(t, diffCmd(), "--", path)
+			if err != nil {
+				t.Fatalf("forge diff -- %s: %v\n%s", path, err, out)
+			}
+			mustContain(t, out, "Subproject commit "+headPin)
+			mustNotContain(t, out, "not in", "payload")
+		})
+	}
+
+	out, err := runForge(t, showCmd(), "HEAD")
+	if err != nil {
+		t.Fatalf("forge show HEAD: %v\n%s", err, out)
+	}
+	// git counts a pointer change as one line replaced, and forge reports what git
+	// counts for anything it cannot diff semantically.
+	mustContain(t, out, "2 files changed", "inner", "pinned.unit", "+1 -1")
+	mustNotContain(t, out, "not in", "payload")
 }
 
 func TestDiffRejectsPathsOutsideTheRepository(t *testing.T) {
