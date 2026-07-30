@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/forgehubproject/forge/internal/fhr"
 	"github.com/forgehubproject/forge/internal/handler"
@@ -63,7 +64,12 @@ func FindRoot() string {
 // when .forge/ has no copy; any write migrates the legacy file first.
 const forgeRepoDir = ".forge"
 
-var legacyFileWarned = map[string]bool{}
+// legacyFileWarned holds the legacy names already noted on stderr, so the note
+// is printed once per process. It is a sync.Map and not a plain one because
+// these files are read on the path of every command and every request: a server
+// serving one repository to a client answers each call on its own goroutine, and
+// a plain map written from two of them at once aborts the process.
+var legacyFileWarned sync.Map
 
 // perRepoFilePath resolves a per-repo forge file for reading: the .forge/
 // location wins, otherwise a legacy root-level file is used if present.
@@ -74,8 +80,7 @@ func perRepoFilePath(repoDir, name, legacyName string) string {
 	}
 	legacy := filepath.Join(repoDir, legacyName)
 	if _, err := os.Stat(legacy); err == nil {
-		if !legacyFileWarned[legacyName] {
-			legacyFileWarned[legacyName] = true
+		if _, warned := legacyFileWarned.LoadOrStore(legacyName, true); !warned {
 			fmt.Fprintf(os.Stderr, "forge: note: %s now lives at %s/%s; it will be moved automatically on the next forge write\n", legacyName, forgeRepoDir, name)
 		}
 		return legacy
