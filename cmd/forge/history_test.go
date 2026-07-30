@@ -305,8 +305,9 @@ func TestDiffFileAbsentAtBothSidesReportsAndContinues(t *testing.T) {
 
 // A third revision cannot be absorbed: git gives three or more a meaning of its
 // own, so comparing the first two and dropping the rest would report a
-// comparison nobody asked for while exiting zero. "--" is the only way past the
-// leading-revision guess, so it is the only way to reach this.
+// comparison nobody asked for while exiting zero. It is refused however it
+// arrives — a third revision is read as the revision it is, not as a path,
+// whether or not the caller typed "--".
 func TestDiffRefusesMoreThanTwoRevisions(t *testing.T) {
 	newHistoryRepo(t)
 
@@ -315,6 +316,11 @@ func TestDiffRefusesMoreThanTwoRevisions(t *testing.T) {
 		{"HEAD~1", "HEAD", "HEAD~1", "HEAD", "--", "asset.unit"},
 		{"HEAD~1", "HEAD", "HEAD~1", "--"},
 		{"--web", "--no-open", "HEAD~1", "HEAD", "HEAD~1", "--", "asset.unit"},
+		{"HEAD~1", "HEAD", "HEAD~1", "notes.txt"},
+		{"HEAD~1", "HEAD", "HEAD~1", "HEAD", "notes.txt"},
+		{"HEAD~1", "HEAD", "HEAD~1"},
+		{"HEAD~1..HEAD", "HEAD~1"},
+		{"--web", "--no-open", "HEAD~1", "HEAD", "HEAD~1", "notes.txt"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			out, err := runForge(t, diffCmd(), args...)
@@ -645,10 +651,22 @@ func TestSplitRevsAndPaths(t *testing.T) {
 		{"absent path after the separator", []string{"ghost.unit"}, 0, nil, []string{"ghost.unit"}},
 		{"absent path after two revisions", []string{"HEAD~1", "HEAD", "ghost.unit"}, -1,
 			[]string{"HEAD~1", "HEAD"}, []string{"ghost.unit"}},
-		// Everything before the separator comes back whatever the count: how many
-		// revisions are allowed is diffSources' and runShow's to say, not this.
+		// Past the second revision a name on disk is a path with nothing left for
+		// "--" to settle, so one that is also a branch needs no separator there.
+		{"a branch that is also a file, after two revisions", []string{"HEAD~1", "HEAD", "asset.unit"}, -1,
+			[]string{"HEAD~1", "HEAD"}, []string{"asset.unit"}},
+		// The revisions come back whatever the count, with or without a separator:
+		// how many are allowed is diffSources' and runShow's to say, not this. A
+		// third read as a path instead would be dropped from a comparison that
+		// then reported success.
 		{"three revisions before the separator", []string{"HEAD~1", "HEAD", "HEAD~1"}, 3,
 			[]string{"HEAD~1", "HEAD", "HEAD~1"}, nil},
+		{"three revisions and no separator", []string{"HEAD~1", "HEAD", "HEAD~1"}, -1,
+			[]string{"HEAD~1", "HEAD", "HEAD~1"}, nil},
+		{"three revisions then a path", []string{"HEAD~1", "HEAD", "HEAD~1", "notes.txt"}, -1,
+			[]string{"HEAD~1", "HEAD", "HEAD~1"}, []string{"notes.txt"}},
+		{"four revisions and no separator", []string{"HEAD~1", "HEAD", "HEAD~1", "HEAD"}, -1,
+			[]string{"HEAD~1", "HEAD", "HEAD~1", "HEAD"}, nil},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

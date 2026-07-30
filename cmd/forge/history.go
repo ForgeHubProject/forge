@@ -96,24 +96,35 @@ func pathExists(p string) bool {
 // paths. An argument that is both a revision and an existing file is refused
 // exactly as git refuses it, because only "--" can say which was meant.
 //
-// The arguments before a "--" come back as given, however many there are: how
-// many revisions are allowed is the command's own to say, as forge show and
-// diffSources each do.
+// Revisions come back however many there are, with or without a "--": how many
+// are allowed is the command's own to say, as forge show and diffSources each do.
 //
 // While a revision is still possible, an argument that is neither a revision git
 // resolves nor a file on disk is refused by name, as git refuses it: a mistyped
 // revision is indistinguishable from a file that is not there, and reading it as
 // a path would compare something other than what was asked for while reporting
-// success. Once the paths have begun — after "--", after a path, or after two
-// revisions, when no further revision can be meant — a path no side holds is
-// kept and reported absent instead.
+// success. Once the paths have begun — after "--", after a path, or after the
+// second revision — a path no side holds is kept and reported absent instead.
 func splitRevsAndPaths(repoDir string, args []string, dashAt int) (revs, paths []string, err error) {
 	if dashAt >= 0 && dashAt <= len(args) {
 		return args[:dashAt], args[dashAt:], nil
 	}
 	i := 0
-	for ; i < len(args) && len(revs) < 2; i++ {
+	for ; i < len(args); i++ {
 		arg := args[i]
+		if len(revs) >= 2 {
+			// Past the second revision the only argument worth telling apart is a
+			// further revision: it is collected, so the command's own arity refuses
+			// it rather than the extras being dropped into a comparison of the
+			// first two that nobody asked for. Anything else begins the paths — a
+			// name on disk, with no ambiguity left for "--" to settle, and a name
+			// no side holds, kept for the caller to report absent.
+			if pathExists(arg) || !isRevision(repoDir, arg) {
+				return revs, args[i:], nil
+			}
+			revs = append(revs, arg)
+			continue
+		}
 		switch {
 		case isRevision(repoDir, arg):
 			if pathExists(arg) {
