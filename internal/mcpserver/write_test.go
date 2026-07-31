@@ -681,6 +681,97 @@ func TestResetRefusesAnUnmergedPathRatherThanForgettingASide(t *testing.T) {
 	}
 }
 
+// newPathspecMergeRepo stops a merge on two paths that no handler claims — one
+// at the root, one under a directory — so what is unmerged is unmerged for git's
+// own reasons and the pathspec reaching it is the only thing under test.
+func newPathspecMergeRepo(t *testing.T) *server {
+	t.Helper()
+	root := newRepo(t)
+
+	writeFileT(t, filepath.Join(root, "asset.dat"), "base\n", 0644)
+	writeFileT(t, filepath.Join(root, "nested", "asset.dat"), "base\n", 0644)
+	gitT(t, root, "add", "-A")
+	gitT(t, root, "commit", "-m", "fixture base")
+
+	for _, side := range []struct{ branch, content string }{{"incoming", "THEIRS\n"}, {"main", "OURS\n"}} {
+		if side.branch == "incoming" {
+			gitT(t, root, "checkout", "-q", "-b", "incoming")
+		} else {
+			gitT(t, root, "checkout", "-q", "main")
+		}
+		writeFileT(t, filepath.Join(root, "asset.dat"), side.content, 0644)
+		writeFileT(t, filepath.Join(root, "nested", "asset.dat"), side.content, 0644)
+		gitT(t, root, "add", "-A")
+		gitT(t, root, "commit", "-m", side.branch)
+	}
+
+	gitAllowT(t, root, "merge", "--no-edit", "incoming")
+	return &server{root: root}
+}
+
+// A pathspec is git's language rather than a file name, and git reset acts on
+// every form of it. Matching those forms here instead of asking git would leave
+// a hole shaped like whichever one the matching did not implement — and what
+// goes through that hole is a merge committed without the side it was merging
+// in, reported by nothing, since after the reset there is no longer anything
+// unmerged for forge_conflicts or forge_status to notice.
+func TestResetRefusesAnUnmergedPathReachedByAnyPathspecGitAccepts(t *testing.T) {
+	s := newPathspecMergeRepo(t)
+	ctx := context.Background()
+
+	for _, paths := range [][]string{
+		{"asset.dat"},
+		{"."},
+		{"*.dat"},
+		{"asset.*"},
+		{"ass*"},
+		{"*"},
+		{"asse?.dat"},
+		{"[a]sset.dat"},
+		{":(glob)*.dat"},
+		{"nested"},
+		{"nested/"},
+		{"nested/*"},
+		{"nested/*.dat"},
+		{"notes.txt", "*.dat"},
+	} {
+		_, _, err := s.reset(ctx, nil, resetIn{Paths: paths})
+		if err == nil {
+			t.Fatalf("reset %v reaches an unmerged path and must be refused", paths)
+		}
+		if !strings.Contains(err.Error(), "unmerged") || !strings.Contains(err.Error(), "forge_resolve_conflict") {
+			t.Fatalf("reset %v must say why and where to go instead: %v", paths, err)
+		}
+		// A refusal that let part of the reset through would leave fewer sides in
+		// the index, and every form after it would be testing a repository that
+		// had already lost one.
+		unmerged, err := s.unmergedPaths(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(unmerged) != 2 || !s.merging(ctx) {
+			t.Fatalf("after refusing %v the index must hold both paths' sides and the merge must still be on: %v", paths, unmerged)
+		}
+	}
+
+	// The refusal is about what a pathspec reaches, not about a merge being under
+	// way: a wildcard that reaches nothing unmerged is an ordinary reset.
+	writeFileT(t, filepath.Join(s.root, "notes.txt"), "edited\n", 0644)
+	if _, _, err := s.add(ctx, nil, addIn{Paths: []string{"notes.txt"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.reset(ctx, nil, resetIn{Paths: []string{"*.txt"}}); err != nil {
+		t.Fatalf("a wildcard reaching nothing unmerged is an ordinary reset: %v", err)
+	}
+	staged, err := forgerepo.GitOutput(ctx, s.root, "diff", "--cached", "--name-only", "--", "notes.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(staged)) != "" {
+		t.Fatalf("notes.txt was reached by *.txt and must have been unstaged: %q", staged)
+	}
+}
+
 // git explains a refused commit; the explanation has to reach the caller. The
 // most common one — nothing staged — git writes to stdout and leaves stderr
 // empty, so a caller reading only stderr is handed an exit status and nothing to
