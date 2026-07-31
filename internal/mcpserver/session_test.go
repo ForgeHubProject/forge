@@ -18,10 +18,21 @@ import (
 // validation of arguments included — rather than the Go functions behind it.
 func connect(t *testing.T, root string) *mcp.ClientSession {
 	t.Helper()
+	return connectTo(t, New(root))
+}
+
+// connectReadOnly does the same for the surface `forge mcp --read-only` serves.
+func connectReadOnly(t *testing.T, root string) *mcp.ClientSession {
+	t.Helper()
+	return connectTo(t, NewReadOnly(root))
+}
+
+func connectTo(t *testing.T, srv *mcp.Server) *mcp.ClientSession {
+	t.Helper()
 	ctx := context.Background()
 
 	clientTransport, serverTransport := mcp.NewInMemoryTransports()
-	serverSession, err := New(root).Connect(ctx, serverTransport, nil)
+	serverSession, err := srv.Connect(ctx, serverTransport, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,37 +75,165 @@ func resultText(res *mcp.CallToolResult) string {
 	return b.String()
 }
 
-func TestSessionAdvertisesSixReadOnlyTools(t *testing.T) {
+// v1Tools is the surface issue #45 shipped, every one of them read-only. It is
+// what `forge mcp --read-only` has to keep serving.
+var v1Tools = []string{
+	"forge_formats", "forge_handler_for", "forge_semantic_diff",
+	"forge_show", "forge_source_list", "forge_status",
+}
+
+// toolsOf lists a session's tools by name, with the tools themselves for the
+// tests that read annotations.
+func toolsOf(t *testing.T, session *mcp.ClientSession) (map[string]*mcp.Tool, []string) {
+	t.Helper()
+	listed, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]*mcp.Tool{}
+	var names []string
+	for _, tool := range listed.Tools {
+		byName[tool.Name] = tool
+		names = append(names, tool.Name)
+	}
+	sort.Strings(names)
+	return byName, names
+}
+
+func TestSessionAdvertisesEveryToolAnnotated(t *testing.T) {
 	session := connect(t, newRepo(t))
 
 	init := session.InitializeResult()
 	if init.ServerInfo.Name != "forge" {
 		t.Fatalf("server name = %q", init.ServerInfo.Name)
 	}
-	for _, want := range []string{"Truncation is always explicit", "#47", "read-only"} {
+	for _, want := range []string{"Truncation is always explicit", "#47", "read-only", "Writes are served"} {
 		if !strings.Contains(init.Instructions, want) {
 			t.Errorf("instructions should state %q", want)
 		}
 	}
 
-	listed, err := session.ListTools(context.Background(), nil)
-	if err != nil {
-		t.Fatal(err)
+	tools, names := toolsOf(t, session)
+	want := []string{
+		"forge_add", "forge_checkout", "forge_commit", "forge_conflicts",
+		"forge_create_branch", "forge_formats", "forge_formats_add",
+		"forge_formats_ignore", "forge_handler_for", "forge_install",
+		"forge_reset", "forge_resolve_conflict", "forge_semantic_diff",
+		"forge_show", "forge_source_list", "forge_status",
 	}
-	var names []string
-	for _, tool := range listed.Tools {
-		names = append(names, tool.Name)
-		if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint {
-			t.Errorf("%s must carry the read-only hint", tool.Name)
-		}
+	if strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Fatalf("tools = %s, want %s", strings.Join(names, ","), strings.Join(want, ","))
+	}
+
+	for _, tool := range tools {
 		if tool.Description == "" || tool.InputSchema == nil || tool.OutputSchema == nil {
 			t.Errorf("%s must be described and schema'd for an agent consumer", tool.Name)
 		}
+		a := tool.Annotations
+		if a == nil || a.Title == "" {
+			t.Fatalf("%s carries no annotations, which a spec-conforming client reads as a destructive tool", tool.Name)
+		}
+		if a.ReadOnlyHint {
+			continue
+		}
+		// The two hints whose omitted default is the dangerous side. A write tool
+		// that leaves either unset is advertising something it did not mean.
+		if a.DestructiveHint == nil {
+			t.Errorf("%s must set destructiveHint explicitly: omitted means destructive", tool.Name)
+		}
+		if a.OpenWorldHint == nil {
+			t.Errorf("%s must set openWorldHint explicitly: omitted means it reaches the network", tool.Name)
+		}
 	}
-	sort.Strings(names)
-	want := "forge_formats,forge_handler_for,forge_semantic_diff,forge_show,forge_source_list,forge_status"
-	if strings.Join(names, ",") != want {
-		t.Fatalf("tools = %s, want %s", strings.Join(names, ","), want)
+
+	// The destructive tools, and the one that reaches the network, are named here
+	// so that either label spreading to another tool — or quietly leaving one —
+	// is a failure rather than a detail nobody looks at. forge_reset discards an
+	// arrangement of the index; forge_resolve_conflict replaces a working-tree
+	// file's whole contents, which is not the additive update the spec's false
+	// means and which a hand-made resolution does not survive.
+	destructive := map[string]bool{"forge_reset": true, "forge_resolve_conflict": true}
+	for name, tool := range tools {
+		if tool.Annotations.ReadOnlyHint {
+			continue
+		}
+		if got := *tool.Annotations.DestructiveHint; got != destructive[name] {
+			t.Errorf("%s destructiveHint = %v", name, got)
+		}
+		if got := *tool.Annotations.OpenWorldHint; got != (name == "forge_install") {
+			t.Errorf("%s openWorldHint = %v", name, got)
+		}
+	}
+}
+
+// Read-only mode is derived from the annotations and from nothing else. The
+// expectation here is computed from what the full server advertises rather than
+// written down, so a tool added later lands in both lists or in neither: a
+// hardcoded list of names in the filter would pass today and drift the first
+// time someone added a read tool.
+func TestReadOnlyModeServesExactlyTheReadOnlyAnnotatedTools(t *testing.T) {
+	root := newRepo(t)
+
+	full, _ := toolsOf(t, connect(t, root))
+	var wantReadOnly []string
+	for name, tool := range full {
+		if tool.Annotations != nil && tool.Annotations.ReadOnlyHint {
+			wantReadOnly = append(wantReadOnly, name)
+		}
+	}
+	sort.Strings(wantReadOnly)
+
+	session := connectReadOnly(t, root)
+	tools, names := toolsOf(t, session)
+	if strings.Join(names, ",") != strings.Join(wantReadOnly, ",") {
+		t.Fatalf("read-only tools = %s, want every read-only-annotated tool: %s",
+			strings.Join(names, ","), strings.Join(wantReadOnly, ","))
+	}
+	for _, tool := range tools {
+		if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint {
+			t.Errorf("%s is served read-only but is not annotated read-only", tool.Name)
+		}
+	}
+	for _, name := range v1Tools {
+		if _, served := tools[name]; !served {
+			t.Errorf("--read-only must keep serving %s, the surface v1 shipped", name)
+		}
+	}
+	if len(tools) != len(v1Tools)+1 {
+		t.Errorf("read-only serves %d tools: the v1 six plus forge_conflicts, which writes nothing", len(tools))
+	}
+
+	// A write tool is not merely hidden: calling it by name fails.
+	res, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "forge_commit",
+		Arguments: map[string]any{"message": "should never happen"},
+	})
+	if err == nil && !res.IsError {
+		t.Fatal("a read-only server must not run a write tool a client names anyway")
+	}
+	if !strings.Contains(session.InitializeResult().Instructions, "started read-only") {
+		t.Error("a read-only server should say so in its instructions")
+	}
+}
+
+// The never-list is an absence, and an absence is only real if nothing named
+// after it exists. A reviewer greps the advertised tools for these; so does this.
+func TestNoToolOffersAForbiddenOperation(t *testing.T) {
+	tools, _ := toolsOf(t, connect(t, newRepo(t)))
+
+	for _, forbidden := range []string{"push", "pull", "fetch", "clone", "amend", "force", "hard", "source_add", "source_remove"} {
+		for name := range tools {
+			if strings.Contains(name, forbidden) {
+				t.Errorf("%s names %q, which this server does not do", name, forbidden)
+			}
+		}
+	}
+	// forge_source_list stays what issue #47 settled it as.
+	if a := tools["forge_source_list"].Annotations; a == nil || !a.ReadOnlyHint {
+		t.Error("forge_source_list must stay read-only")
+	}
+	if !strings.Contains(tools["forge_source_list"].Description, "terminal") {
+		t.Error("forge_source_list must keep saying the source list is a human's decision at a terminal")
 	}
 }
 
@@ -214,6 +353,7 @@ func TestSessionAnswersConcurrentCalls(t *testing.T) {
 		{"forge_semantic_diff", map[string]any{"path": "asset.unit"}},
 		{"forge_show", map[string]any{"ref": "HEAD"}},
 		{"forge_source_list", map[string]any{}},
+		{"forge_conflicts", map[string]any{}},
 	}
 
 	// Released together, so the calls reach the shared state at the same moment

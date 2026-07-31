@@ -17,6 +17,12 @@ import (
 // SubprocessHandler wraps an FHR handler binary as a ForgeHandler.
 // Match is fast (extension check from metadata); Diff/Merge spawn the subprocess.
 //
+// Those are the calls, and there are no others: a method here that spawned a
+// subcommand the protocol does not define would be forge inventing one on every
+// handler author's behalf, and every handler that exists would answer it with
+// "unknown subcommand". handler.ConflictApplier is the interface that invites
+// exactly that, which is why nothing here implements it.
+//
 // ctx is held rather than taken per call because ForgeHandler's methods take
 // none: it bounds the subprocesses this handler spawns, so a caller that builds
 // one registry per cancellable unit of work — a request rather than a process —

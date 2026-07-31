@@ -650,7 +650,7 @@ func TestRunRefusesOutsideARepository(t *testing.T) {
 	}
 	t.Chdir(dir)
 
-	err := Run(context.Background())
+	err := Run(context.Background(), false)
 	if err == nil || !strings.Contains(err.Error(), "must be started inside one") {
 		t.Fatalf("expected a clean refusal, got: %v", err)
 	}

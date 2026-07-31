@@ -77,6 +77,12 @@ type ConflictSidecar struct {
 
 // ConflictApplier is an optional interface handlers may implement to support
 // interactive conflict resolution in forge mergetool.
+//
+// No handler forge loads from a binary implements it, and none can: the
+// subprocess protocol has calls for match, diff and merge, and none that decides
+// one conflict at a time. It is an in-process interface, which is why every
+// caller has a route that works without it — a conflict decided the same way
+// throughout a file is the merge itself, run from one side or the other.
 type ConflictApplier interface {
 	ApplyChoices(merged, theirs Blob, takePaths []string) (Blob, error)
 }
