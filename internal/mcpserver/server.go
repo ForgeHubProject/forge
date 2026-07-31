@@ -356,7 +356,7 @@ are in the working tree, and the resolution for it is an ordinary text edit.`,
 
 	addTool(s, srv, &mcp.Tool{
 		Name:        "forge_resolve_conflict",
-		Annotations: writeTool("Resolve one file's semantic conflicts", false, true, false),
+		Annotations: writeTool("Resolve one file's semantic conflicts", true, true, false),
 		Description: `Decide the semantic conflicts in one unmerged file and write the resolved result
 to the working tree. Call forge_conflicts first: its conflict paths are what this
 takes.
@@ -376,10 +376,17 @@ which decides every conflict the other way while keeping what both sides changed
 without disagreeing. A file that needs one unit from each side is one to resolve
 in a tool of your own and stage with forge_add.
 
-Not destructive, and this is a fact about the construction rather than a claim:
-the merge is recomputed from the three stages the index holds, so until the file
-is staged the conflicted pre-image is still recoverable from the index and this
-call can be made again with different choices to overwrite its own result.
+Destructive, and precisely about the file it writes: it replaces that file's
+whole contents in the working tree, and it cannot tell its own earlier result
+from something a person put there. A resolution made by hand in that file — what
+forge mergetool asks a human for when forge cannot apply the choices itself —
+exists nowhere else, and does not survive this call. Ask before overwriting a
+file whose current contents nobody here has accounted for.
+
+What does survive is the conflict. The merge is recomputed from the three stages
+the index holds, so until the file is staged those stages are all still there and
+this call can be made again with different choices — which is what makes it
+repeatable, not what makes it safe for whatever the file holds now.
 
 Writes the merged file, and stops there. It does not stage — that is forge_add —
 and it does not commit or conclude the merge.

@@ -146,14 +146,18 @@ func TestSessionAdvertisesEveryToolAnnotated(t *testing.T) {
 		}
 	}
 
-	// The one destructive tool, and the one that reaches the network, are named
-	// here so that either label spreading to another tool is a failure rather
-	// than a detail nobody looks at.
+	// The destructive tools, and the one that reaches the network, are named here
+	// so that either label spreading to another tool — or quietly leaving one —
+	// is a failure rather than a detail nobody looks at. forge_reset discards an
+	// arrangement of the index; forge_resolve_conflict replaces a working-tree
+	// file's whole contents, which is not the additive update the spec's false
+	// means and which a hand-made resolution does not survive.
+	destructive := map[string]bool{"forge_reset": true, "forge_resolve_conflict": true}
 	for name, tool := range tools {
 		if tool.Annotations.ReadOnlyHint {
 			continue
 		}
-		if got := *tool.Annotations.DestructiveHint; got != (name == "forge_reset") {
+		if got := *tool.Annotations.DestructiveHint; got != destructive[name] {
 			t.Errorf("%s destructiveHint = %v", name, got)
 		}
 		if got := *tool.Annotations.OpenWorldHint; got != (name == "forge_install") {

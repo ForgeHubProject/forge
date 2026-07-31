@@ -252,8 +252,10 @@ func TestResolveConflictWritesTheSideThatWasChosen(t *testing.T) {
 		t.Fatalf("the response must echo what was applied: %+v", out.Applied)
 	}
 
-	// Nothing is staged, which is what leaves the pre-image recoverable — the
+	// Nothing is staged, which is what leaves the conflict recoverable — the
 	// index still holds all three sides — and what makes the call repeatable.
+	// It leaves nothing of the working tree copy recoverable, which is a
+	// separate matter and the one below is about.
 	if out.Staged {
 		t.Fatal("forge_resolve_conflict must not stage")
 	}
@@ -514,6 +516,50 @@ func TestAddSaysWhatItConcludedRatherThanThatNothingHappened(t *testing.T) {
 	}
 	if len(quiet.Concluded) != 0 || quiet.Note != "nothing changed for those paths, so the index is as it was" {
 		t.Fatalf("an add that really changed nothing: %+v", quiet)
+	}
+}
+
+// forge_resolve_conflict replaces the file's whole contents, and those bytes are
+// the one thing in this loop nothing else holds a copy of. A resolution made by
+// hand in the working tree — the route forge mergetool sends a human down when
+// forge cannot apply the choices itself — is overwritten by a call that cannot
+// tell it from its own earlier result. Per the spec destructiveHint false means
+// additive updates only, which a client may auto-approve on, so the annotation
+// has to be the other one.
+func TestResolveConflictIsAnnotatedForTheFileItOverwrites(t *testing.T) {
+	s := newMergeRepo(t)
+	ctx := context.Background()
+
+	byHand := "resolved by hand, held in no index anywhere"
+	writeFileT(t, filepath.Join(s.root, "asset.merge"), byHand, 0644)
+
+	_, out, err := s.resolveConflict(ctx, nil, resolveConflictIn{
+		Path:    "asset.merge",
+		Choices: []conflictChoice{{Path: "alpha", Take: "ours"}, {Path: "beta", Take: "ours"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := readT(t, s.root, "asset.merge"); got == byHand {
+		t.Fatal("this test annotates an overwrite, and the overwrite did not happen")
+	}
+	// The response is what a caller reads afterwards, so what it says about the
+	// index must not read as an assurance about the file.
+	if !strings.Contains(out.Note, "over whatever that file held") {
+		t.Fatalf("the note must not offer the index as cover for the overwrite: %q", out.Note)
+	}
+	// The index holds three versions of this file and the overwritten one was
+	// none of them, which is what makes the write unrecoverable.
+	for _, stage := range []string{":1:", ":2:", ":3:"} {
+		if blob, err := forgerepo.GitOutput(ctx, s.root, "show", stage+"asset.merge"); err == nil && string(blob) == byHand {
+			t.Fatalf("%sasset.merge holds the overwritten bytes after all", stage)
+		}
+	}
+
+	tools, _ := toolsOf(t, connect(t, s.root))
+	a := tools["forge_resolve_conflict"].Annotations
+	if a == nil || a.DestructiveHint == nil || !*a.DestructiveHint {
+		t.Fatalf("replacing a file's contents whole is not the additive update destructiveHint false means: %+v", a)
 	}
 }
 
