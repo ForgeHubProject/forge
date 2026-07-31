@@ -204,9 +204,16 @@ type resolveConflictOut struct {
 // resolution that depended on state left by an earlier one would resolve against
 // a merge that may no longer be the repository's.
 //
-// Nothing is staged. That is what keeps the pre-image recoverable — the index
+// Nothing is staged. That is what keeps the conflict recoverable — the index
 // still holds all three stages of the file — and it is why this call can be made
 // again with different choices.
+//
+// It is not what keeps the working tree recoverable, and nothing here is: the
+// write replaces that file whole, and content that lived only there — a
+// resolution someone made by hand, which is the route forge mergetool sends a
+// human down — is gone with it. The index holds three versions of this file and
+// none of them is the one being overwritten. That is what this tool's
+// destructive annotation is about.
 func (s *server) resolveConflict(ctx context.Context, _ *mcp.CallToolRequest, in resolveConflictIn) (*mcp.CallToolResult, resolveConflictOut, error) {
 	var out resolveConflictOut
 
@@ -251,7 +258,7 @@ func (s *server) resolveConflict(ctx context.Context, _ *mcp.CallToolRequest, in
 	result := merged
 	switch {
 	case len(conflicts) == 0:
-		out.Note = "the handler merged this file with no semantic conflict, so there was nothing to decide; the merged result is what was written"
+		out.Note = "the handler merged this file with no semantic conflict, so there was nothing to decide; the merged result is what was written, over whatever that file held"
 	case len(take) == 0:
 		// A merge leaves ours in place wherever it could not reconcile, so taking
 		// every conflict from ours is the merged blob unchanged.
@@ -269,7 +276,7 @@ func (s *server) resolveConflict(ctx context.Context, _ *mcp.CallToolRequest, in
 	}
 	out.Applied = normalizedChoices(conflicts, in.Choices)
 	if out.Note == "" {
-		out.Note = fmt.Sprintf("%d conflict(s) resolved and written to the working tree. Nothing is staged: the index still holds all three sides of this file, so these choices can be made again differently. Stage it with forge_add when it is right.", len(conflicts))
+		out.Note = fmt.Sprintf("%d conflict(s) resolved and written to the working tree, over whatever that file held: the index holds all three sides of this merge and none of them is the copy that was replaced. Nothing is staged, so these choices can be made again differently. Stage it with forge_add when it is right.", len(conflicts))
 	}
 	return nil, out, nil
 }
