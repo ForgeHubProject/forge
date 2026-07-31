@@ -213,6 +213,20 @@ func (s *server) reset(ctx context.Context, _ *mcp.CallToolRequest, in resetIn) 
 		if paths, err = s.resolveAll(in.Paths); err != nil {
 			return nil, out, err
 		}
+		// An unmerged path has nothing staged to take back: the index holds all
+		// three sides of it, and a path-scoped reset replaces them with HEAD's one
+		// version. The merge stays in progress, so what is left looks like a path
+		// that was resolved — nothing is unmerged, forge_status is clean, and the
+		// next commit records a merge whose incoming side was never in it. That is
+		// the one thing this tool must not be able to do quietly.
+		unmerged, err := s.unmergedPaths(ctx)
+		if err != nil {
+			return nil, out, err
+		}
+		if hit := coveredBy(unmerged, paths); len(hit) > 0 {
+			return nil, out, fmt.Errorf("%s %s unmerged, so nothing is staged there to take back — this would replace the sides the index holds with the one HEAD has, and the side being merged in is recorded nowhere else. The merge would still be in progress and %s would look resolved. Decide %s with forge_resolve_conflict, or reset only what is staged",
+				strings.Join(hit, ", "), plural(len(hit), "is", "are"), plural(len(hit), "it", "they"), plural(len(hit), "it", "them"))
+		}
 	}
 	args := []string{"reset", "-q"}
 	if len(paths) > 0 {
@@ -236,6 +250,22 @@ func (s *server) reset(ctx context.Context, _ *mcp.CallToolRequest, in resetIn) 
 		out.Note = "unstaged; those files still hold exactly the bytes they held"
 	}
 	return nil, out, nil
+}
+
+// coveredBy returns the candidates a pathspec argument reaches: one named
+// outright, or one under a named directory. "." is the repository root, which
+// reaches everything.
+func coveredBy(candidates, pathspecs []string) []string {
+	var hit []string
+	for _, c := range candidates {
+		for _, p := range pathspecs {
+			if p == "." || c == p || strings.HasPrefix(c, p+"/") {
+				hit = append(hit, c)
+				break
+			}
+		}
+	}
+	return hit
 }
 
 // merging reports whether a merge is in progress, which a whole-index reset ends.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -176,7 +177,7 @@ func (s *server) conflictFile(ctx context.Context, reg *handler.Registry, path s
 
 type resolveConflictIn struct {
 	Path    string           `json:"path" jsonschema:"repository-relative path of the unmerged file to resolve"`
-	Choices []conflictChoice `json:"choices" jsonschema:"one choice per conflict forge_conflicts reports for this file; a conflict left undecided is refused rather than defaulted"`
+	Choices []conflictChoice `json:"choices" jsonschema:"one choice per conflict forge_conflicts reports for this file, all naming the same side; a conflict left undecided is refused rather than defaulted, and so is a call that mixes the two sides"`
 }
 
 // conflictChoice is one decision. Only the two sides that exist can be chosen:
@@ -184,7 +185,7 @@ type resolveConflictIn struct {
 // from neither side is a file write and not a merge resolution.
 type conflictChoice struct {
 	Path string `json:"path" jsonschema:"a conflict path from forge_conflicts"`
-	Take string `json:"take" jsonschema:"\"ours\" for the side already checked out, \"theirs\" for the side being merged in"`
+	Take string `json:"take" jsonschema:"\"ours\" for the side already checked out, \"theirs\" for the side being merged in; every choice in one call must name the same side"`
 }
 
 type resolveConflictOut struct {
@@ -250,19 +251,16 @@ func (s *server) resolveConflict(ctx context.Context, _ *mcp.CallToolRequest, in
 	switch {
 	case len(conflicts) == 0:
 		out.Note = "the handler merged this file with no semantic conflict, so there was nothing to decide; the merged result is what was written"
-	case len(take) > 0:
-		// ApplyChoices takes the paths to take from theirs, and only those: a merge
-		// leaves ours in place where it could not reconcile, so an all-ours
-		// resolution is the merged blob unchanged and needs no second call — which
-		// is also what lets a handler that merges but does not apply choices still
-		// answer for it.
-		applier, ok := h.(handler.ConflictApplier)
-		if !ok {
-			return nil, out, fmt.Errorf("handler %q reports conflicts in %s but cannot apply choices to it; only an all-\"ours\" resolution is available here, and taking anything from theirs has to be done in a tool of your own", out.HandlerID, path)
+	case len(take) == 0:
+		// A merge leaves ours in place wherever it could not reconcile, so taking
+		// every conflict from ours is the merged blob unchanged.
+	case len(take) == len(conflicts):
+		if result, err = takeTheirSide(h, stages, conflicts, out.HandlerID, path); err != nil {
+			return nil, out, err
 		}
-		if result, err = applier.ApplyChoices(merged, stages.theirs, take); err != nil {
-			return nil, out, fmt.Errorf("handler %q refused to apply these choices to %s: %w", out.HandlerID, path, err)
-		}
+	default:
+		return nil, out, fmt.Errorf("one side per file: %d of this file's %d conflicts %s given \"theirs\" and the rest \"ours\", and the handler protocol has no call that decides a single one — a merge decides all of them at once, for whichever side it is given. Take them all from the same side, or resolve %s in a tool of your own and stage it with forge_add",
+			len(take), len(conflicts), plural(len(take), "is", "are"), path)
 	}
 
 	if err := s.writeWorktreeFile(path, result); err != nil {
@@ -273,6 +271,47 @@ func (s *server) resolveConflict(ctx context.Context, _ *mcp.CallToolRequest, in
 		out.Note = fmt.Sprintf("%d conflict(s) resolved and written to the working tree. Nothing is staged: the index still holds all three sides of this file, so these choices can be made again differently. Stage it with forge_add when it is right.", len(conflicts))
 	}
 	return nil, out, nil
+}
+
+// takeTheirSide builds the resolution in which every conflict is decided for the
+// side being merged in: the same merge, run with the two sides exchanged.
+//
+// That is the whole construction, and it is the only one the handler protocol
+// offers. A merge keeps whichever side it was given as ours wherever it could not
+// reconcile — that is what makes an all-ours resolution the merged blob unchanged
+// — so exchanging the two decides every conflict the other way while keeping
+// what both sides changed without disagreeing. There is no call that decides one
+// conflict at a time, and forge does not invent one.
+//
+// The exchange is checked rather than assumed. A handler that reports different
+// conflicts when asked from the other side has not answered the same question,
+// so its result cannot be read as "theirs at the units named" and is refused
+// instead of written.
+func takeTheirSide(h handler.ForgeHandler, stages indexStages, conflicts []handler.SemanticConflict, id, path string) ([]byte, error) {
+	exchanged, ci, err := h.Merge(stages.base, stages.theirs, stages.ours)
+	if err != nil {
+		return nil, fmt.Errorf("handler %q merges %s one way but not the other, and merging it from the side being merged in is how taking theirs is built: %w", id, path, err)
+	}
+	var got []handler.SemanticConflict
+	if ci != nil {
+		got = ci.Conflicts
+	}
+	if asIs, other := conflictPaths(conflicts), conflictPaths(got); !slices.Equal(asIs, other) {
+		return nil, fmt.Errorf("handler %q disagrees with itself about %s: merged one way it reports conflicts at %s, and with the sides exchanged at %s. Taking theirs is that second merge, so forge cannot tell that its result decides the conflicts you named — resolve this file in a tool of your own and stage it with forge_add",
+			id, path, strings.Join(asIs, ", "), strings.Join(other, ", "))
+	}
+	return exchanged, nil
+}
+
+// conflictPaths is the set of units a merge could not reconcile, sorted, which
+// is what makes two merges of the same file comparable.
+func conflictPaths(conflicts []handler.SemanticConflict) []string {
+	paths := make([]string, 0, len(conflicts))
+	for _, c := range conflicts {
+		paths = append(paths, c.Path)
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 // choicesFor validates a caller's decisions against the conflicts the handler

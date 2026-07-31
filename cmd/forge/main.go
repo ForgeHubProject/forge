@@ -1361,24 +1361,29 @@ func applyConflictChoices(path, sidecarPath string, sc handler.ConflictSidecar, 
 		return false
 	}
 
-	theirsBlob, err := base64.StdEncoding.DecodeString(sc.TheirsB64)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "forge: could not decode theirs blob: %v\n", err)
-		return false
-	}
 	merged, err := os.ReadFile(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "forge: could not read %s: %v\n", path, err)
 		return false
 	}
-	result, err := applier.ApplyChoices(merged, theirsBlob, takePaths)
-	if err != nil {
-		// A handler binary offers the apply-choices call only if it implements it,
-		// and the protocol gives it no way to say which of "cannot" and "failed"
-		// this was. Either way the choices could not be applied here, so the same
-		// route out is offered as for a handler that never had the call.
-		fmt.Fprintf(os.Stderr, "forge: %s could not apply these choices: %v\n", sc.Handler, err)
-		return promptManualResolve(path, sc.Conflicts)
+	// Keeping every conflict at current is the merged file already on disk: the
+	// merge left the current side wherever it could not reconcile. There is
+	// nothing for the handler to apply, so it is not asked — a call that can only
+	// return what is already here is one more thing that can fail.
+	result := merged
+	if len(takePaths) > 0 {
+		theirsBlob, err := base64.StdEncoding.DecodeString(sc.TheirsB64)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "forge: could not decode the incoming side: %v\n", err)
+			return false
+		}
+		if result, err = applier.ApplyChoices(merged, theirsBlob, takePaths); err != nil {
+			// The interface says a handler can apply choices; it does not promise the
+			// attempt succeeds. Either way the choices could not be applied here, so
+			// the same route out is offered as for a handler that never had it.
+			fmt.Fprintf(os.Stderr, "forge: %s could not apply these choices: %v\n", sc.Handler, err)
+			return promptManualResolve(path, sc.Conflicts)
+		}
 	}
 	if err := os.WriteFile(path, result, 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "forge: could not write %s: %v\n", path, err)
