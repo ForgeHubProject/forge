@@ -1276,16 +1276,7 @@ func resolveInteractive(path string, h handler.ForgeHandler) bool {
 
 	applier, canApply := h.(handler.ConflictApplier)
 	if !canApply {
-		fmt.Printf("Conflicts in %s:\n", path)
-		for _, c := range sc.Conflicts {
-			fmt.Printf("  %s\n    current:  %v\n    incoming: %v\n", c.Path, c.Ours, c.Theirs)
-		}
-		fmt.Printf("Resolve in your tool and re-export, then 'git add %s'.\n", path)
-		resolved := promptConfirm(fmt.Sprintf("Mark %s as resolved?", path))
-		if resolved {
-			cleanupMergeTempFiles(path)
-		}
-		return resolved
+		return promptManualResolve(path, sc.Conflicts)
 	}
 
 	n := len(sc.Conflicts)
@@ -1338,6 +1329,22 @@ func resolveInteractive(path string, h handler.ForgeHandler) bool {
 	}
 }
 
+// promptManualResolve is the route out when forge cannot apply the choices
+// itself: the conflicts are printed for the human to act on in their own tool,
+// and they say whether the file is resolved.
+func promptManualResolve(path string, conflicts []handler.SemanticConflict) bool {
+	fmt.Printf("Conflicts in %s:\n", path)
+	for _, c := range conflicts {
+		fmt.Printf("  %s\n    current:  %v\n    incoming: %v\n", c.Path, c.Ours, c.Theirs)
+	}
+	fmt.Printf("Resolve in your tool and re-export, then 'git add %s'.\n", path)
+	resolved := promptConfirm(fmt.Sprintf("Mark %s as resolved?", path))
+	if resolved {
+		cleanupMergeTempFiles(path)
+	}
+	return resolved
+}
+
 func applyConflictChoices(path, sidecarPath string, sc handler.ConflictSidecar, choices []bool, applier handler.ConflictApplier) bool {
 	fmt.Printf("\nSummary for %s:\n", path)
 	var takePaths []string
@@ -1354,20 +1361,29 @@ func applyConflictChoices(path, sidecarPath string, sc handler.ConflictSidecar, 
 		return false
 	}
 
-	theirsBlob, err := base64.StdEncoding.DecodeString(sc.TheirsB64)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "forge: could not decode theirs blob: %v\n", err)
-		return false
-	}
 	merged, err := os.ReadFile(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "forge: could not read %s: %v\n", path, err)
 		return false
 	}
-	result, err := applier.ApplyChoices(merged, theirsBlob, takePaths)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "forge: ApplyChoices failed: %v\n", err)
-		return false
+	// Keeping every conflict at current is the merged file already on disk: the
+	// merge left the current side wherever it could not reconcile. There is
+	// nothing for the handler to apply, so it is not asked — a call that can only
+	// return what is already here is one more thing that can fail.
+	result := merged
+	if len(takePaths) > 0 {
+		theirsBlob, err := base64.StdEncoding.DecodeString(sc.TheirsB64)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "forge: could not decode the incoming side: %v\n", err)
+			return false
+		}
+		if result, err = applier.ApplyChoices(merged, theirsBlob, takePaths); err != nil {
+			// The interface says a handler can apply choices; it does not promise the
+			// attempt succeeds. Either way the choices could not be applied here, so
+			// the same route out is offered as for a handler that never had it.
+			fmt.Fprintf(os.Stderr, "forge: %s could not apply these choices: %v\n", sc.Handler, err)
+			return promptManualResolve(path, sc.Conflicts)
+		}
 	}
 	if err := os.WriteFile(path, result, 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "forge: could not write %s: %v\n", path, err)
@@ -1651,26 +1667,36 @@ func runMergeFile(_ *cobra.Command, args []string) error {
 // ── forge mcp ───────────────────────────────────────────────────────────────────────────────────────
 
 func mcpCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "mcp",
 		Short: "Serve this repository to an MCP client over stdio",
 		Long: `Runs a Model Context Protocol server over stdin and stdout, so an agent can
-ask the questions forge can answer: what changed inside a file whose format has
-a handler, which handler claims a path, what a commit changed.
+ask the questions forge can answer — what changed inside a file whose format has
+a handler, which handler claims a path, what a commit changed — and complete the
+loop those answers are for: decide a semantic conflict, write the resolution,
+stage it, commit it.
 
-Every tool is read-only, and the source list — forge's trust boundary — is
-reported but never modified. The repository is the one this command is run in,
-resolved once at startup; every path an agent passes is resolved against that
-root and refused if it points outside.
+Writes are served by default. --read-only serves only the tools annotated
+read-only, and takes precedence over anything else in a client's configuration.
+Either way the source list — forge's trust boundary — is reported but never
+modified, nothing is pushed, pulled or fetched, and no tool amends, forces or
+resets the working tree.
+
+The repository is the one this command is run in, resolved once at startup;
+every path an agent passes is resolved against that root and refused if it
+points outside.
 
 stdout carries the protocol, so run it from a client rather than a terminal:
 
   { "mcpServers": { "forge": { "command": "forge", "args": ["mcp"] } } }`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return mcpserver.Run(cmd.Context())
+			readOnly, _ := cmd.Flags().GetBool("read-only")
+			return mcpserver.Run(cmd.Context(), readOnly)
 		},
 	}
+	cmd.Flags().Bool("read-only", false, "Serve only the tools that change nothing")
+	return cmd
 }
 
 // ── forge source ────────────────────────────────────────────────────────────────────────────────────
