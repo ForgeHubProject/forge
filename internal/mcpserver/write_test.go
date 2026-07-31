@@ -662,6 +662,23 @@ func TestResetRefusesAnUnmergedPathRatherThanForgettingASide(t *testing.T) {
 	} else if len(out.Unstaged) != 1 {
 		t.Fatalf("reset = %+v", out)
 	}
+
+	// The whole-index reset during a merge is a different thing and stays
+	// available: it ends the merge outright rather than leaving one behind that
+	// looks finished, and the response says so.
+	_, whole, err := s.reset(ctx, nil, resetIn{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(whole.Note, "cleared the merge in progress") {
+		t.Fatalf("a whole-index reset that ended a merge must say so: %+v", whole)
+	}
+	if s.merging(ctx) {
+		t.Fatal("a whole-index reset ends the merge")
+	}
+	if got := readT(t, s.root, "asset.merge"); got != before {
+		t.Fatalf("no reset touches a file's contents: %q", got)
+	}
 }
 
 // git explains a refused commit; the explanation has to reach the caller. The
