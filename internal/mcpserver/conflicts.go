@@ -403,8 +403,18 @@ func (s *server) indexStages(ctx context.Context, path string) (indexStages, err
 
 // unmergedPaths lists what the index holds more than one stage of, sorted and
 // without repeats — one path is up to three records there.
-func (s *server) unmergedPaths(ctx context.Context) ([]string, error) {
-	out, err := forgerepo.GitOutput(ctx, s.root, "ls-files", "-u", "-z")
+//
+// Pathspecs narrow it to what those same pathspecs reach elsewhere. They are
+// passed to git untouched rather than matched here, because a pathspec is git's
+// language — wildcards, magic prefixes, exclusions — and only git can say what
+// one of them selects. A caller asking "does this pathspec reach an unmerged
+// path" has to ask it the way the command it is guarding will ask it.
+func (s *server) unmergedPaths(ctx context.Context, pathspecs ...string) ([]string, error) {
+	args := []string{"ls-files", "-u", "-z"}
+	if len(pathspecs) > 0 {
+		args = append(append(args, "--"), pathspecs...)
+	}
+	out, err := forgerepo.GitOutput(ctx, s.root, args...)
 	if err != nil {
 		return nil, err
 	}
