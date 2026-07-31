@@ -12,13 +12,19 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// mergeHandlerScript is a handler for ".merge" that implements the two calls the
-// resolution loop needs and nothing else it depends on: merge reports a fixed
-// pair of conflicts, and apply-choices reports back which of them the caller
-// asked to take from theirs — encoded into the blob it returns, so a test can
-// assert that the choices reached the handler rather than only that a file was
-// written. The blobs it is handed are ignored: what is being exercised is the
-// loop, not any format.
+// mergeOursSide is the shell a fixture handler uses to answer a merge the way a
+// real one does: the side it was handed as ours is what its result holds, named
+// in the blob so a test can tell which of the two it was given. That is the
+// property every resolution here is built on — a merge keeps ours wherever it
+// could not reconcile — and the only way to assert it is a handler whose output
+// says which side that was.
+const mergeOursSide = `ours=$(sed 's/.*"ours":"\([^"]*\)".*/\1/' | base64 -d)`
+
+// mergeHandlerScript is a handler for ".merge" implementing the protocol's
+// match/diff/merge and nothing else — there is nothing else for a handler binary
+// to implement. Its merge reports a fixed pair of conflicts. The blobs it is
+// handed are otherwise ignored: what is being exercised is the loop, not any
+// format.
 const mergeHandlerScript = `#!/bin/sh
 case "$1" in
 info)
@@ -29,15 +35,8 @@ diff)
   printf '%s\n' '{"version":"1.0","format":"unit-merge","changes":[]}'
   ;;
 merge)
-  cat >/dev/null
-  printf '{"blob":"%s","conflicts":[{"path":"alpha","ours":"a-ours","theirs":"a-theirs"},{"path":"beta","ours":"b-ours","theirs":"b-theirs"}]}\n' "$(printf 'merged' | base64)"
-  ;;
-apply-choices)
-  body=$(cat)
-  taken=""
-  case "$body" in *'"alpha"'*) taken="${taken}alpha," ;; esac
-  case "$body" in *'"beta"'*) taken="${taken}beta," ;; esac
-  printf '{"blob":"%s"}\n' "$(printf 'merged+%s' "$taken" | base64)"
+  ` + mergeOursSide + `
+  printf '{"blob":"%s","conflicts":[{"path":"alpha","ours":"a-ours","theirs":"a-theirs"},{"path":"beta","ours":"b-ours","theirs":"b-theirs"}]}\n' "$(printf 'merged:%s' "$ours" | base64)"
   ;;
 *)
   echo "unknown subcommand: $1" >&2
@@ -46,15 +45,35 @@ apply-choices)
 esac
 `
 
-// noApplyHandlerScript is a handler for ".noapply" that merges and reports a
-// conflict but does not implement apply-choices — the handler most of the
-// ecosystem is, since the call is optional. Taking anything from theirs has to
-// fail against it, and say so.
-const noApplyHandlerScript = `#!/bin/sh
+// mergeOnlyHandlerScript is a handler for ".mergeonly" implementing merge and
+// nothing else — no info, no diff. Every side of a conflict has to be reachable
+// against it, because merge is the only call the protocol has that decides one.
+const mergeOnlyHandlerScript = `#!/bin/sh
 case "$1" in
 merge)
-  cat >/dev/null
-  printf '{"blob":"%s","conflicts":[{"path":"gamma","ours":"g-ours","theirs":"g-theirs"}]}\n' "$(printf 'merged' | base64)"
+  ` + mergeOursSide + `
+  printf '{"blob":"%s","conflicts":[{"path":"gamma","ours":"g-ours","theirs":"g-theirs"}]}\n' "$(printf 'merged:%s' "$ours" | base64)"
+  ;;
+*)
+  echo "unimplemented" >&2
+  exit 1
+  ;;
+esac
+`
+
+// lopsidedHandlerScript is a handler for ".lopsided" that reports a conflict
+// merging one way and none the other. Taking theirs is the merge run from the
+// other side, so a handler that answers a different question there cannot be
+// read as having decided the conflict that was named.
+const lopsidedHandlerScript = `#!/bin/sh
+case "$1" in
+merge)
+  ` + mergeOursSide + `
+  if [ "$ours" = "OURS" ]; then
+    printf '{"blob":"%s","conflicts":[{"path":"delta","ours":"d-ours","theirs":"d-theirs"}]}\n' "$(printf 'merged:%s' "$ours" | base64)"
+  else
+    printf '{"blob":"%s"}\n' "$(printf 'merged:%s' "$ours" | base64)"
+  fi
   ;;
 *)
   echo "unimplemented" >&2
@@ -74,9 +93,10 @@ func gitAllowT(t *testing.T, dir string, args ...string) {
 	_ = c.Run()
 }
 
-// newMergeRepo builds a repository stopped in the middle of a merge, with three
-// unmerged paths: one whose handler can apply choices, one whose handler cannot,
-// and one no handler claims at all.
+// newMergeRepo builds a repository stopped in the middle of a merge, with four
+// unmerged paths: one whose handler implements the whole protocol, one whose
+// handler implements only merge, one whose handler answers a different question
+// with the sides exchanged, and one no handler claims at all.
 func newMergeRepo(t *testing.T) *server {
 	t.Helper()
 	root := newRepo(t)
@@ -85,10 +105,13 @@ func newMergeRepo(t *testing.T) *server {
 	writeFileT(t, filepath.Join(plugins, "forge-handler-unit-merge"), mergeHandlerScript, 0755)
 	writeFileT(t, filepath.Join(plugins, "forge-handler-unit-merge.json"),
 		`{"id":"unit-merge","build":"`+mergeBuild+`","source":"https://example.invalid/manifest.toml","formats":[".merge"]}`, 0644)
-	writeFileT(t, filepath.Join(plugins, "forge-handler-unit-noapply"), noApplyHandlerScript, 0755)
-	writeFileT(t, filepath.Join(plugins, "forge-handler-unit-noapply.json"),
-		`{"id":"unit-noapply","build":"nobuild","source":"https://example.invalid/manifest.toml","formats":[".noapply"]}`, 0644)
-	writeFileT(t, filepath.Join(root, ".forge", "formats"), ".unit\n.merge\n.noapply\n!.ignored\n", 0644)
+	writeFileT(t, filepath.Join(plugins, "forge-handler-unit-mergeonly"), mergeOnlyHandlerScript, 0755)
+	writeFileT(t, filepath.Join(plugins, "forge-handler-unit-mergeonly.json"),
+		`{"id":"unit-mergeonly","build":"nobuild","source":"https://example.invalid/manifest.toml","formats":[".mergeonly"]}`, 0644)
+	writeFileT(t, filepath.Join(plugins, "forge-handler-unit-lopsided"), lopsidedHandlerScript, 0755)
+	writeFileT(t, filepath.Join(plugins, "forge-handler-unit-lopsided.json"),
+		`{"id":"unit-lopsided","build":"nobuild","source":"https://example.invalid/manifest.toml","formats":[".lopsided"]}`, 0644)
+	writeFileT(t, filepath.Join(root, ".forge", "formats"), ".unit\n.merge\n.mergeonly\n.lopsided\n!.ignored\n", 0644)
 
 	// Start from a clean tree so the only changes under test are the ones below.
 	gitT(t, root, "add", "-A")
@@ -101,7 +124,8 @@ func newMergeRepo(t *testing.T) *server {
 			gitT(t, root, "checkout", "-q", "main")
 		}
 		writeFileT(t, filepath.Join(root, "asset.merge"), side.content, 0644)
-		writeFileT(t, filepath.Join(root, "stuck.noapply"), side.content, 0644)
+		writeFileT(t, filepath.Join(root, "minimal.mergeonly"), side.content, 0644)
+		writeFileT(t, filepath.Join(root, "tilted.lopsided"), side.content, 0644)
 		writeFileT(t, filepath.Join(root, "plain.txt"), side.content+"\n", 0644)
 		gitT(t, root, "add", "-A")
 		gitT(t, root, "commit", "-m", side.branch)
@@ -125,8 +149,8 @@ func TestConflictsReportsWhatTheHandlerCouldNotReconcile(t *testing.T) {
 	for _, f := range out.Files {
 		files[f.Path] = f
 	}
-	if len(files) != 3 {
-		t.Fatalf("expected three unmerged paths, got %d: %+v", len(files), out.Files)
+	if len(files) != 4 {
+		t.Fatalf("expected four unmerged paths, got %d: %+v", len(files), out.Files)
 	}
 
 	asset := files["asset.merge"]
@@ -164,7 +188,7 @@ func TestConflictsTruncationIsExplicit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !out.Truncated.Truncated || out.Truncated.Returned != 1 || out.Truncated.Total != 3 {
+	if !out.Truncated.Truncated || out.Truncated.Returned != 1 || out.Truncated.Total != 4 {
 		t.Fatalf("a cap must report itself with true totals: %+v", out.Truncated)
 	}
 	if !strings.Contains(out.Truncated.Hint, `after="asset.merge"`) {
@@ -175,7 +199,7 @@ func TestConflictsTruncationIsExplicit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rest.Files) != 2 || rest.Files[0].Path != "plain.txt" {
+	if len(rest.Files) != 3 || rest.Files[0].Path != "minimal.mergeonly" {
 		t.Fatalf("after must continue the listing: %+v", rest.Files)
 	}
 
@@ -194,7 +218,12 @@ func TestConflictsTruncationIsExplicit(t *testing.T) {
 	}
 }
 
-func TestResolveConflictAppliesChoicesAndWritesTheResult(t *testing.T) {
+// Both sides are reachable against a handler binary, and neither needs a call
+// the subprocess protocol does not have: ours is the merge as it stands, theirs
+// is the same merge run from the other side. The fixture handler names the side
+// it was handed as ours in its result, so these assertions are about which merge
+// was actually run and not merely that a file was written.
+func TestResolveConflictWritesTheSideThatWasChosen(t *testing.T) {
 	s := newMergeRepo(t)
 	ctx := context.Background()
 
@@ -202,7 +231,7 @@ func TestResolveConflictAppliesChoicesAndWritesTheResult(t *testing.T) {
 		Path: "asset.merge",
 		Choices: []conflictChoice{
 			{Path: "alpha", Take: "theirs"},
-			{Path: "beta", Take: "ours"},
+			{Path: "beta", Take: "theirs"},
 		},
 	})
 	if err != nil {
@@ -211,12 +240,10 @@ func TestResolveConflictAppliesChoicesAndWritesTheResult(t *testing.T) {
 	if out.HandlerID != "unit-merge" || out.HandlerBuild != mergeBuild {
 		t.Fatalf("every semantic payload carries handler and build: %+v", out)
 	}
-	// The blob the handler returned encodes the paths it was told to take, so this
-	// asserts the choices reached it and not merely that something was written.
-	if got := readT(t, s.root, "asset.merge"); got != "merged+alpha," {
-		t.Fatalf("working tree holds %q, want the result of taking alpha from theirs", got)
+	if got := readT(t, s.root, "asset.merge"); got != "merged:THEIRS" {
+		t.Fatalf("working tree holds %q, want the merge run from the side being merged in", got)
 	}
-	if len(out.Applied) != 2 || out.Applied[0].Take != "theirs" || out.Applied[1].Take != "ours" {
+	if len(out.Applied) != 2 || out.Applied[0].Take != "theirs" || out.Applied[1].Take != "theirs" {
 		t.Fatalf("the response must echo what was applied: %+v", out.Applied)
 	}
 
@@ -233,15 +260,89 @@ func TestResolveConflictAppliesChoicesAndWritesTheResult(t *testing.T) {
 		t.Fatal("the index must still hold the conflicted stages until the file is staged")
 	}
 
-	// Idempotent, and re-decidable: the same call gives the same bytes, and a
-	// different call overwrites its own result rather than compounding it.
+	// Re-decidable: the other side overwrites the first answer rather than
+	// compounding it, and it is the merge unchanged.
 	if _, _, err := s.resolveConflict(ctx, nil, resolveConflictIn{Path: "asset.merge", Choices: []conflictChoice{
 		{Path: "alpha", Take: "ours"}, {Path: "beta", Take: "ours"},
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if got := readT(t, s.root, "asset.merge"); got != "merged" {
+	if got := readT(t, s.root, "asset.merge"); got != "merged:OURS" {
 		t.Fatalf("an all-ours resolution is the merged blob unchanged, got %q", got)
+	}
+
+	// A handler that implements merge and nothing else answers for both sides,
+	// which is the whole point of building them out of merge: every handler in
+	// the ecosystem has that call and none has another.
+	for _, take := range []string{"ours", "theirs"} {
+		if _, _, err := s.resolveConflict(ctx, nil, resolveConflictIn{
+			Path: "minimal.mergeonly", Choices: []conflictChoice{{Path: "gamma", Take: take}},
+		}); err != nil {
+			t.Fatalf("taking %q from a merge-only handler: %v", take, err)
+		}
+		if got, want := readT(t, s.root, "minimal.mergeonly"), "merged:"+strings.ToUpper(take); got != want {
+			t.Fatalf("taking %q wrote %q, want %q", take, got, want)
+		}
+	}
+}
+
+// A file needing one unit from each side cannot be built out of merge, and no
+// handler binary offers anything else. It is refused whole rather than written
+// half-right, and the refusal says what is available instead.
+func TestResolveConflictRefusesAMixOfSides(t *testing.T) {
+	s := newMergeRepo(t)
+	ctx := context.Background()
+
+	before := readT(t, s.root, "asset.merge")
+	_, _, err := s.resolveConflict(ctx, nil, resolveConflictIn{
+		Path: "asset.merge",
+		Choices: []conflictChoice{
+			{Path: "alpha", Take: "theirs"},
+			{Path: "beta", Take: "ours"},
+		},
+	})
+	if err == nil {
+		t.Fatal("a mix of sides in one file must be refused")
+	}
+	for _, want := range []string{"one side per file", "1 of this file's 2 conflicts"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the refusal must say %q: %v", want, err)
+		}
+	}
+	if got := readT(t, s.root, "asset.merge"); got != before {
+		t.Fatalf("a refused resolution must write nothing: %q", got)
+	}
+}
+
+// Taking theirs is the merge run from the other side. A handler that reports
+// different conflicts there was asked a different question, so its answer cannot
+// be read as having decided the conflict that was named.
+func TestResolveConflictRefusesAHandlerThatAnswersADifferentQuestion(t *testing.T) {
+	s := newMergeRepo(t)
+	ctx := context.Background()
+
+	// Ours needs only the merge that was already run, so it is unaffected.
+	if _, _, err := s.resolveConflict(ctx, nil, resolveConflictIn{
+		Path: "tilted.lopsided", Choices: []conflictChoice{{Path: "delta", Take: "ours"}},
+	}); err != nil {
+		t.Fatalf("ours needs only the merge that was already run: %v", err)
+	}
+	before := readT(t, s.root, "tilted.lopsided")
+	if before != "merged:OURS" {
+		t.Fatalf("tilted.lopsided holds %q", before)
+	}
+
+	_, _, err := s.resolveConflict(ctx, nil, resolveConflictIn{
+		Path: "tilted.lopsided", Choices: []conflictChoice{{Path: "delta", Take: "theirs"}},
+	})
+	if err == nil {
+		t.Fatal("a handler that disagrees with itself must not have its result written as a resolution")
+	}
+	if !strings.Contains(err.Error(), "unit-lopsided") || !strings.Contains(err.Error(), "delta") {
+		t.Fatalf("the refusal must name the handler and what it disagreed about: %v", err)
+	}
+	if got := readT(t, s.root, "tilted.lopsided"); got != before {
+		t.Fatalf("a refused resolution must not overwrite what is there: %q", got)
 	}
 }
 
@@ -270,20 +371,6 @@ func TestResolveConflictRefusesWhatItCannotHonestlyDecide(t *testing.T) {
 			}
 		})
 	}
-
-	// A handler that merges but cannot apply choices answers for an all-ours
-	// resolution and refuses the rest, saying which it was.
-	if _, _, err := s.resolveConflict(ctx, nil, resolveConflictIn{
-		Path: "stuck.noapply", Choices: []conflictChoice{{Path: "gamma", Take: "ours"}},
-	}); err != nil {
-		t.Fatalf("all-ours needs no apply-choices call: %v", err)
-	}
-	_, _, err := s.resolveConflict(ctx, nil, resolveConflictIn{
-		Path: "stuck.noapply", Choices: []conflictChoice{{Path: "gamma", Take: "theirs"}},
-	})
-	if err == nil || !strings.Contains(err.Error(), "unit-noapply") {
-		t.Fatalf("expected the handler's own refusal, got: %v", err)
-	}
 }
 
 // The whole loop, in the order an agent runs it: read the conflicts, decide
@@ -303,15 +390,16 @@ func TestTheResolutionLoopCompletesAMerge(t *testing.T) {
 	if _, _, err := s.resolveConflict(ctx, nil, resolveConflictIn{Path: "asset.merge", Choices: choices}); err != nil {
 		t.Fatal(err)
 	}
-	if got := readT(t, s.root, "asset.merge"); got != "merged+alpha,beta," {
-		t.Fatalf("both sides taken from theirs should show in the result, got %q", got)
+	if got := readT(t, s.root, "asset.merge"); got != "merged:THEIRS" {
+		t.Fatalf("every conflict taken from theirs is the merge from that side, got %q", got)
 	}
 
-	// The other two are resolved the way a caller without a handler has to: edit
-	// and stage.
-	writeFileT(t, filepath.Join(s.root, "plain.txt"), "resolved\n", 0644)
-	writeFileT(t, filepath.Join(s.root, "stuck.noapply"), "resolved", 0644)
-	if _, _, err := s.add(ctx, nil, addIn{Paths: []string{"asset.merge", "plain.txt", "stuck.noapply"}}); err != nil {
+	// The rest are resolved the way a caller without a handler has to: edit and
+	// stage.
+	for _, p := range []string{"plain.txt", "minimal.mergeonly", "tilted.lopsided"} {
+		writeFileT(t, filepath.Join(s.root, p), "resolved\n", 0644)
+	}
+	if _, _, err := s.add(ctx, nil, addIn{Paths: []string{"asset.merge", "plain.txt", "minimal.mergeonly", "tilted.lopsided"}}); err != nil {
 		t.Fatal(err)
 	}
 	left, err := s.unmergedPaths(ctx)
@@ -521,6 +609,88 @@ func TestResetUnstagesAndLeavesTheWorkingTreeAlone(t *testing.T) {
 	}
 	if got := readT(t, s.root, "untracked.txt"); got != "u" {
 		t.Fatalf("a file unstaged back to untracked must still be on disk: %q", got)
+	}
+}
+
+// An unmerged path has nothing staged to take back, and a path-scoped reset of
+// one replaces every side the index holds with HEAD's. The merge would carry on
+// with that path looking settled, and the commit at the end of it would record a
+// merge one of whose sides was never in it — silently, since nothing after the
+// reset has anything left to report. It is refused instead.
+func TestResetRefusesAnUnmergedPathRatherThanForgettingASide(t *testing.T) {
+	s := newMergeRepo(t)
+	ctx := context.Background()
+
+	before := readT(t, s.root, "asset.merge")
+	for _, in := range []resetIn{
+		{Paths: []string{"asset.merge"}},
+		{Paths: []string{"."}},
+		{Paths: []string{"notes.txt", "plain.txt"}},
+	} {
+		_, _, err := s.reset(ctx, nil, in)
+		if err == nil {
+			t.Fatalf("reset %v during a merge must be refused", in.Paths)
+		}
+		if !strings.Contains(err.Error(), "unmerged") || !strings.Contains(err.Error(), "forge_resolve_conflict") {
+			t.Fatalf("the refusal must say why and where to go instead: %v", err)
+		}
+	}
+
+	// Refused whole: the index still holds every side, the merge is still in
+	// progress, and the file is untouched.
+	unmerged, err := s.unmergedPaths(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unmerged) != 4 {
+		t.Fatalf("a refused reset must leave the index as it was: %v", unmerged)
+	}
+	if !s.merging(ctx) {
+		t.Fatal("a refused reset must leave the merge in progress")
+	}
+	if got := readT(t, s.root, "asset.merge"); got != before {
+		t.Fatalf("reset must never touch a file's contents: %q", got)
+	}
+
+	// A path that is not unmerged is still resettable during a merge.
+	writeFileT(t, filepath.Join(s.root, "notes.txt"), "edited\n", 0644)
+	if _, _, err := s.add(ctx, nil, addIn{Paths: []string{"notes.txt"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, out, err := s.reset(ctx, nil, resetIn{Paths: []string{"notes.txt"}}); err != nil {
+		t.Fatalf("an ordinary staged path is not what this refusal is about: %v", err)
+	} else if len(out.Unstaged) != 1 {
+		t.Fatalf("reset = %+v", out)
+	}
+}
+
+// git explains a refused commit; the explanation has to reach the caller. The
+// most common one — nothing staged — git writes to stdout and leaves stderr
+// empty, so a caller reading only stderr is handed an exit status and nothing to
+// act on.
+func TestCommitCarriesGitsOwnExplanation(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+
+	writeFileT(t, filepath.Join(s.root, "asset.unit"), "changed but never staged", 0644)
+	before, err := forgerepo.GitOutput(ctx, s.root, "rev-list", "--count", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = s.commit(ctx, nil, commitIn{Message: "nothing is staged"})
+	if err == nil {
+		t.Fatal("a commit with nothing staged must fail")
+	}
+	if !strings.Contains(err.Error(), "no changes added to commit") {
+		t.Fatalf("git's own explanation must reach the caller, got: %v", err)
+	}
+	after, err := forgerepo.GitOutput(ctx, s.root, "rev-list", "--count", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("a refused commit must record nothing")
 	}
 }
 

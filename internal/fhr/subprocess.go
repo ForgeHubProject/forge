@@ -17,6 +17,12 @@ import (
 // SubprocessHandler wraps an FHR handler binary as a ForgeHandler.
 // Match is fast (extension check from metadata); Diff/Merge spawn the subprocess.
 //
+// Those are the calls, and there are no others: a method here that spawned a
+// subcommand the protocol does not define would be forge inventing one on every
+// handler author's behalf, and every handler that exists would answer it with
+// "unknown subcommand". handler.ConflictApplier is the interface that invites
+// exactly that, which is why nothing here implements it.
+//
 // ctx is held rather than taken per call because ForgeHandler's methods take
 // none: it bounds the subprocesses this handler spawns, so a caller that builds
 // one registry per cancellable unit of work — a request rather than a process —
@@ -108,47 +114,6 @@ func (h *SubprocessHandler) Merge(base, ours, theirs handler.Blob) (handler.Blob
 		ci = &handler.ConflictInfo{Conflicts: result.Conflicts}
 	}
 	return merged, ci, nil
-}
-
-// ApplyChoices implements handler.ConflictApplier over the protocol's
-// apply-choices call: the blob a conflicted merge produced, the theirs side it
-// was merged against, and the semantic paths whose theirs value is to replace
-// what the merge left in place. Only those paths are named — a merge leaves ours
-// where it could not reconcile, so an all-ours resolution needs no call at all.
-//
-// The call is optional, like info and merge, and a handler that does not
-// implement it fails here. That failure is returned as it came rather than
-// translated: a handler binary cannot tell forge "I do not implement this" in a
-// way that is distinguishable from "this call failed", so reporting it as either
-// one would be an invention, and the caller shows the handler's own words.
-func (h *SubprocessHandler) ApplyChoices(merged, theirs handler.Blob, takePaths []string) (handler.Blob, error) {
-	if takePaths == nil {
-		takePaths = []string{}
-	}
-	inp, _ := json.Marshal(struct {
-		Merged    string   `json:"merged"`
-		Theirs    string   `json:"theirs"`
-		TakePaths []string `json:"takePaths"`
-	}{
-		Merged:    base64.StdEncoding.EncodeToString(merged),
-		Theirs:    base64.StdEncoding.EncodeToString(theirs),
-		TakePaths: takePaths,
-	})
-	out, err := runSubprocess(h.ctx, h.binaryPath, "apply-choices", inp)
-	if err != nil {
-		return nil, err
-	}
-	var result struct {
-		Blob string `json:"blob"`
-	}
-	if err := json.Unmarshal(out, &result); err != nil {
-		return nil, fmt.Errorf("parsing apply-choices output from %s: %w", h.id, err)
-	}
-	blob, err := base64.StdEncoding.DecodeString(result.Blob)
-	if err != nil {
-		return nil, fmt.Errorf("decoding resolved blob from %s: %w", h.id, err)
-	}
-	return blob, nil
 }
 
 // Info is what a handler binary answers for the protocol's "info" call: the id

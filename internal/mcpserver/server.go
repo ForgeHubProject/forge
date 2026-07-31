@@ -367,6 +367,15 @@ resolved with a default nobody chose. There is no parameter for replacement
 content: handing a file's whole bytes to a merge tool is a plain file write in a
 merge costume, and forge does not offer it.
 
+One side per file. The choices in a call must all name the same side, and a call
+that mixes them is refused rather than half-applied. That is the handler protocol
+speaking: it has a merge call and no call that decides a single conflict, so
+"ours" is the merge as it stands — a merge keeps the checked-out side wherever it
+could not reconcile — and "theirs" is that same merge run from the other side,
+which decides every conflict the other way while keeping what both sides changed
+without disagreeing. A file that needs one unit from each side is one to resolve
+in a tool of your own and stage with forge_add.
+
 Not destructive, and this is a fact about the construction rather than a claim:
 the merge is recomputed from the three stages the index holds, so until the file
 is staged the conflicted pre-image is still recoverable from the index and this
@@ -456,7 +465,13 @@ Files themselves are untouched: a path unstaged here still holds exactly the
 bytes it held before. One consequence is worth knowing before you call it with
 no paths during a merge: resetting the whole index also ends the merge git
 thought was in progress. Every file keeps its contents, but forge_conflicts will
-have nothing left to report. The response says so when it happens.`,
+have nothing left to report. The response says so when it happens.
+
+An unmerged path is refused rather than reset. Nothing is staged for one — the
+index holds every side of it — so there is nothing to take back, and taking it
+back would mean keeping one side and forgetting the other while the merge carried
+on as if the file were settled. forge_resolve_conflict is what decides such a
+path.`,
 	}, s.reset)
 
 	addTool(s, srv, &mcp.Tool{

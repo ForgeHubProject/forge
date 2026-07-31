@@ -66,7 +66,16 @@ func GitOutput(ctx context.Context, repoDir string, args ...string) ([]byte, err
 	out, err := c.Output()
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		if msg := strings.TrimSpace(string(exitErr.Stderr)); msg != "" {
+		msg := strings.TrimSpace(string(exitErr.Stderr))
+		if msg == "" {
+			// git writes some of its refusals to stdout: a commit with nothing
+			// staged prints the whole reason there and leaves stderr empty. Falling
+			// back to it is what keeps a caller from being handed an exit status
+			// with no explanation attached — which is the one thing git never
+			// actually does.
+			msg = strings.TrimSpace(string(out))
+		}
+		if msg != "" {
 			return nil, fmt.Errorf("git %s: %s", strings.Join(args, " "), msg)
 		}
 	}
