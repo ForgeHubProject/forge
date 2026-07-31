@@ -52,7 +52,7 @@ func DownloadRenderer(m *FHRManifest, handlerID, sourceURL string) (string, erro
 	}
 
 	bundlePath := filepath.Join(renderersDir, rendererFileName(handlerID))
-	fmt.Printf("Downloading renderer for %s...\n", handlerID)
+	fmt.Fprintf(os.Stderr, "Downloading renderer for %s...\n", handlerID)
 	hash, err := downloadFile(assetURL, bundlePath)
 	if err != nil {
 		return "", fmt.Errorf("downloading renderer for %s: %w", handlerID, err)
