@@ -223,6 +223,123 @@ func TestConflictsTruncationIsExplicit(t *testing.T) {
 	}
 }
 
+// newAbsentHandlerMergeRepo stops a merge on three paths no installed handler
+// claims, one for each reason a path lands there: an extension this repository
+// opts in whose handler is not installed on this machine — the state every
+// repository is in until its handler is installed — one it has deliberately
+// marked as unhandled, and one it says nothing about.
+//
+// Both sides of the opted-in file hold a NUL byte, so git merges neither of them
+// as text: it leaves the checked-out side in the working tree whole, with no
+// markers in it. That pairing is the fixture's point, because it is the state in
+// which both things a note could assert about such a path are false at once.
+func newAbsentHandlerMergeRepo(t *testing.T) *server {
+	t.Helper()
+	root := newRepo(t)
+
+	writeFileT(t, filepath.Join(root, ".forge", "formats"), ".unit\n.absent\n!.ignored\n", 0644)
+	writeFileT(t, filepath.Join(root, "shape.absent"), "\x00\x01base", 0644)
+	writeFileT(t, filepath.Join(root, "left.ignored"), "base\n", 0644)
+	gitT(t, root, "add", "-A")
+	gitT(t, root, "commit", "-m", "fixture base")
+
+	for _, side := range []struct{ branch, content string }{{"incoming", "THEIRS"}, {"main", "OURS"}} {
+		if side.branch == "incoming" {
+			gitT(t, root, "checkout", "-q", "-b", "incoming")
+		} else {
+			gitT(t, root, "checkout", "-q", "main")
+		}
+		writeFileT(t, filepath.Join(root, "shape.absent"), "\x00\x01"+side.content, 0644)
+		writeFileT(t, filepath.Join(root, "left.ignored"), side.content+"\n", 0644)
+		writeFileT(t, filepath.Join(root, "notes.txt"), side.content+"\n", 0644)
+		gitT(t, root, "add", "-A")
+		gitT(t, root, "commit", "-m", side.branch)
+	}
+
+	gitAllowT(t, root, "merge", "--no-edit", "incoming")
+	return &server{root: root}
+}
+
+// A note about a path forge cannot answer for could assert two things — that no
+// handler exists for it, and that git's markers are in the working tree — and
+// both are false together in the one state that costs something: a repository
+// that opts a format in whose handler is not installed here. Nothing merges such
+// a file, so git leaves the checked-out side whole, and "edit the markers, then
+// stage" reduces there to "stage the file exactly as the merge left it", which
+// concludes the merge with the incoming side dropped. So neither is asserted:
+// both are read, and the note says what was read.
+func TestConflictsSaysWhyForgeCannotAnswerAndWhatGitLeft(t *testing.T) {
+	s := newAbsentHandlerMergeRepo(t)
+	ctx := context.Background()
+
+	_, out, err := s.conflicts(ctx, nil, conflictsIn{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]conflictFile{}
+	for _, f := range out.Files {
+		files[f.Path] = f
+	}
+
+	// The fixture's premise, asserted rather than assumed: this passing while git
+	// writes markers into that file would pin nothing.
+	onDisk := readT(t, s.root, "shape.absent")
+	if strings.Contains(onDisk, "<<<<<<<") {
+		t.Fatalf("fixture no longer reproduces a merge git could not do as text: %q", onDisk)
+	}
+	ours, err := forgerepo.GitOutput(ctx, s.root, "show", ":2:shape.absent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(ours) != onDisk {
+		t.Fatalf("fixture must leave the checked-out side whole: %q against %q", onDisk, ours)
+	}
+
+	absent := files["shape.absent"]
+	if absent.HandlerID != nil || !absent.OptedIn {
+		t.Fatalf("an opted-in extension with no installed handler is both, and says so: %+v", absent)
+	}
+	if absent.Markers == nil || *absent.Markers {
+		t.Fatalf("what git left has to be read: %+v", absent)
+	}
+	if strings.Contains(absent.Note, "no handler claims this path") {
+		t.Fatalf("the handler this repository expects is missing, not nonexistent: %q", absent.Note)
+	}
+	if !strings.Contains(absent.Note, ".forge/formats") || !strings.Contains(absent.Note, "forge_formats") {
+		t.Fatalf("the remedy is the handler, and the note has to point at it: %q", absent.Note)
+	}
+	if strings.Contains(absent.Note, "markers are in the working tree") {
+		t.Fatalf("there are no markers in that file: %q", absent.Note)
+	}
+	if !strings.Contains(absent.Note, "nothing of the side being merged in") {
+		t.Fatalf("staging it as it stands drops the incoming side, and the note has to say so: %q", absent.Note)
+	}
+
+	// A path that really is an ordinary text conflict still gets the answer that
+	// was always right for it.
+	for _, path := range []string{"left.ignored", "notes.txt"} {
+		entry := files[path]
+		if entry.Markers == nil || !*entry.Markers {
+			t.Fatalf("%s holds git's own markers: %+v", path, entry)
+		}
+		if !strings.Contains(entry.Note, "conflict markers are in the working tree") || !strings.Contains(entry.Note, "text edit") {
+			t.Fatalf("%s note wrong: %q", path, entry.Note)
+		}
+	}
+	if plain := files["notes.txt"]; plain.OptedIn || !strings.Contains(plain.Note, "no handler claims this path") {
+		t.Fatalf("an extension this repository says nothing about really has no handler here: %+v", plain)
+	}
+	if left := files["left.ignored"]; !strings.Contains(left.Note, "deliberately marked") {
+		t.Fatalf("an ignored extension is a decision this repository made, not an absence: %q", left.Note)
+	}
+
+	// The refusal that turns a caller back here must not assert it either.
+	_, _, err = s.resolveConflict(ctx, nil, resolveConflictIn{Path: "shape.absent"})
+	if err == nil || strings.Contains(err.Error(), "markers") {
+		t.Fatalf("resolve must refuse without claiming what is in that file: %v", err)
+	}
+}
+
 // Both sides are reachable against a handler binary, and neither needs a call
 // the subprocess protocol does not have: ours is the merge as it stands, theirs
 // is the same merge run from the other side. The fixture handler names the side
@@ -366,7 +483,7 @@ func TestResolveConflictRefusesWhatItCannotHonestlyDecide(t *testing.T) {
 		{"no choices at all", resolveConflictIn{Path: "asset.merge"}, "every conflict must be decided"},
 		{"a conflict that does not exist", resolveConflictIn{Path: "asset.merge", Choices: []conflictChoice{{Path: "nope", Take: "ours"}}}, "no conflict at"},
 		{"a side that is neither", resolveConflictIn{Path: "asset.merge", Choices: []conflictChoice{{Path: "alpha", Take: "mine"}, {Path: "beta", Take: "ours"}}}, `"ours" or "theirs"`},
-		{"a path no handler claims", resolveConflictIn{Path: "plain.txt"}, "no handler claims"},
+		{"a path no handler claims", resolveConflictIn{Path: "plain.txt"}, "no installed handler claims"},
 		{"a path that is not unmerged", resolveConflictIn{Path: "notes.txt"}, "not unmerged"},
 		{"a path outside the repository", resolveConflictIn{Path: "../escape"}, "outside the repository"},
 	}

@@ -350,8 +350,13 @@ narrows to one file, and after continues the file listing from a path a previous
 response returned. Truncation is explicit and the hint names the call that
 reaches what was withheld.
 
-A path no handler claims is listed with no semantic conflicts: git's own markers
-are in the working tree, and the resolution for it is an ordinary text edit.`,
+A path forge has no semantic answer for is listed with no conflicts, and its
+entry says why and what git left on disk for it rather than assuming either.
+optedIn beside a null handlerId is a handler this repository expects that is not
+installed here — a handler away from an answer, not a path forge knows nothing
+about. conflictMarkers false is a file git could not merge as text: it holds the
+checked-out side whole, nothing in it is there to edit, and staging it unchanged
+concludes the conflict with the incoming side dropped.`,
 	}, s.conflicts)
 
 	addTool(s, srv, &mcp.Tool{
@@ -391,8 +396,10 @@ repeatable, not what makes it safe for whatever the file holds now.
 Writes the merged file, and stops there. It does not stage — that is forge_add —
 and it does not commit or conclude the merge.
 
-A file whose format has no handler has no semantic conflicts to decide, and is
-refused here: resolve its markers as text and stage it.`,
+A file no installed handler claims has no semantic conflicts to decide, and is
+refused here. What to do with it instead is forge_conflicts' answer: an extension
+this repository opts in wants its handler installed, and a file git left without
+conflict markers has nothing in it to edit at all.`,
 	}, s.resolveConflict)
 
 	addTool(s, srv, &mcp.Tool{

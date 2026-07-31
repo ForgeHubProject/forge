@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -33,8 +34,10 @@ type conflictsOut struct {
 
 type conflictFile struct {
 	Path         string             `json:"path"`
-	HandlerID    *string            `json:"handlerId" jsonschema:"the handler that claims this path, or null when none does"`
+	HandlerID    *string            `json:"handlerId" jsonschema:"the installed handler that answers for this path, or null when none does on this machine"`
 	HandlerBuild string             `json:"handlerBuild,omitempty" jsonschema:"build of the installed handler that produced these conflicts"`
+	OptedIn      bool               `json:"optedIn" jsonschema:"true when this repository opts this path's extension in in .forge/formats; true beside a null handlerId is a handler this repository expects that is not installed here, which is a handler away from a semantic answer rather than a path forge has none for"`
+	Markers      *bool              `json:"conflictMarkers,omitempty" jsonschema:"whether git's own conflict markers are in the working tree copy; false means git could not merge these two sides as text either and left the checked-out side whole, so there is nothing in that file to edit. Reported only for a path forge has no semantic answer for, which is the only path whose resolution depends on it"`
 	Conflicts    []semanticConflict `json:"conflicts,omitempty" jsonschema:"the semantic units the handler could not reconcile"`
 	Total        int                `json:"conflictCount" jsonschema:"how many conflicts this file has in total; more than the list holds means this response withheld some"`
 	Truncated    *truncation        `json:"truncated,omitempty" jsonschema:"present when this file's conflict list was cut"`
@@ -121,22 +124,47 @@ func (s *server) conflicts(ctx context.Context, _ *mcp.CallToolRequest, in confl
 	}
 
 	reg := forgerepo.Registry(ctx, s.root)
+	formats := loadRepoFormats(s.root)
 	for _, path := range files {
-		out.Files = append(out.Files, s.conflictFile(ctx, reg, path, perFile))
+		out.Files = append(out.Files, s.conflictFile(ctx, reg, formats, path, perFile))
 	}
 	return nil, out, nil
+}
+
+// repoFormats is what .forge/formats says, read once for a whole response: one
+// file answers for every path in it, and re-reading it per path would let two
+// entries of one listing be answered from two different versions of it.
+type repoFormats struct {
+	optedIn map[string]bool
+	ignored map[string]bool
+}
+
+func loadRepoFormats(root string) repoFormats {
+	return repoFormats{
+		optedIn: forgerepo.LoadForgeFormats(root),
+		ignored: forgerepo.LoadIgnoredFormats(root),
+	}
 }
 
 // conflictFile answers for one unmerged path, capped at its share of the
 // response. A file forge cannot merge is reported with the reason rather than
 // dropped: the caller has to resolve it somehow, and knowing why forge cannot
 // help is what tells them which way.
-func (s *server) conflictFile(ctx context.Context, reg *handler.Registry, path string, max int) conflictFile {
+func (s *server) conflictFile(ctx context.Context, reg *handler.Registry, formats repoFormats, path string, max int) conflictFile {
 	entry := conflictFile{Path: path}
+	ext := strings.ToLower(filepath.Ext(path))
+	entry.OptedIn = formats.optedIn[ext]
 
 	h, err := reg.Resolve(path)
 	if err != nil || !forgerepo.IsBinaryHandler(h) {
-		entry.Note = "no handler claims this path, so forge has no semantic answer for it: git's own conflict markers are in the working tree, and resolving it is an ordinary text edit followed by forge_add"
+		wt := s.readWorktreeState(ctx, path)
+		if wt.read {
+			// Left null rather than false when the copy could not be read: false
+			// here is the answer that sends a caller to stage the file as it
+			// stands, and not knowing is not that answer.
+			entry.Markers = &wt.markers
+		}
+		entry.Note = unclaimedNote(path, ext, formats, wt)
 		return entry
 	}
 	id := forgerepo.HandlerFormat(h)
@@ -174,6 +202,96 @@ func (s *server) conflictFile(ctx context.Context, reg *handler.Registry, path s
 		entry.Conflicts = append(entry.Conflicts, semanticConflict{Path: c.Path, Ours: c.Ours, Theirs: c.Theirs})
 	}
 	return entry
+}
+
+// worktreeState is what git actually left on disk for an unmerged path. Which of
+// the two states it is decides what resolving that path means, and they are
+// opposites: markers are a merge of both sides with the disagreements written
+// into the file to be edited out, and no markers is one side of it whole, with
+// nothing in the file to edit and the other side recorded only in the index.
+type worktreeState struct {
+	read    bool
+	markers bool
+	ours    bool
+}
+
+// readWorktreeState reads that state. Nothing here is inferred from the file's
+// name or from whether a handler claims it — git decides per file whether it can
+// merge two blobs as text, and the answer is in what it wrote.
+//
+// The last path component is not followed. Reading through a link would answer
+// about a file this repository does not track, and a note is only worth as much
+// as the file it is about.
+func (s *server) readWorktreeState(ctx context.Context, path string) worktreeState {
+	var st worktreeState
+	full := filepath.Join(s.root, filepath.FromSlash(path))
+	if info, err := os.Lstat(full); err != nil || !info.Mode().IsRegular() {
+		return st
+	}
+	data, err := os.ReadFile(full)
+	if err != nil {
+		return st
+	}
+	st.read = true
+	st.markers = hasConflictMarkers(data)
+	if ours, err := forgerepo.GitOutput(ctx, s.root, "show", ":2:"+path); err == nil {
+		st.ours = bytes.Equal(data, ours)
+	}
+	return st
+}
+
+// conflictMarker opens a conflict git wrote as text, at the start of a line. Its
+// length is configurable upwards, so it is matched as a line's prefix rather than
+// as a whole line.
+var (
+	conflictMarker     = []byte("<<<<<<<")
+	conflictMarkerLine = []byte("\n<<<<<<<")
+)
+
+// hasConflictMarkers reports whether git left one in a file.
+func hasConflictMarkers(data []byte) bool {
+	return bytes.HasPrefix(data, conflictMarker) || bytes.Contains(data, conflictMarkerLine)
+}
+
+// unclaimedNote answers for a path forge has no semantic answer for. It says two
+// things, and they are separate facts: why forge cannot answer, and what git left
+// in the working tree. Only the second decides what resolving the path means, and
+// asserting either without reading it is how a caller is sent to do the wrong
+// thing.
+//
+// Why matters because "this repository expects a handler that is not installed
+// here" is not "forge knows no handler for this": the remedy for the first is the
+// handler, and pointing at a text edit instead skips past it.
+//
+// What git left matters more. It writes its markers only where it merged the two
+// sides as text; where it could not, it leaves the checked-out side whole — which
+// is the state this branch is reached in most often, since a format opted in
+// without its handler installed is exactly a format nothing merges. There is
+// nothing in such a file to edit, and staging it as it stands concludes the
+// conflict with the incoming side dropped.
+func unclaimedNote(path, ext string, formats repoFormats, wt worktreeState) string {
+	var why string
+	switch {
+	case formats.ignored[ext]:
+		why = fmt.Sprintf("this repository has deliberately marked %s as having no handler, so forge has no semantic answer for this path.", ext)
+	case formats.optedIn[ext]:
+		why = fmt.Sprintf("this repository opts %s in in .forge/formats but no installed handler claims it on this machine, so forge has no semantic answer for this path here: the handler is missing rather than nonexistent, and forge_formats reports which one it is.", ext)
+	default:
+		why = "no handler claims this path, so forge has no semantic answer for it."
+	}
+
+	sides := fmt.Sprintf("Both sides are in the index — `git show :2:%s` is the one already checked out, `git show :3:%s` the one being merged in", path, path)
+	switch {
+	case wt.markers:
+		return why + " git's own conflict markers are in the working tree, and resolving it is an ordinary text edit followed by forge_add"
+	case !wt.read:
+		return fmt.Sprintf("%s Its working tree copy could not be read here, so what git left in it is unknown. %s, and forge_add stages whatever that file holds now", why, sides)
+	case wt.ours:
+		return fmt.Sprintf("%s git did not merge these two sides as text either, so there are no conflict markers in the working tree copy to edit: it is byte-for-byte the side already checked out, and forge_add on it as it stands would conclude this conflict with nothing of the side being merged in. %s — resolving it means putting a result in that file first",
+			why, sides)
+	default:
+		return fmt.Sprintf("%s There are no conflict markers in the working tree copy, so what is on disk is not git's merge of the two sides. %s, and forge_add stages whatever that file holds now", why, sides)
+	}
 }
 
 type resolveConflictIn struct {
@@ -233,7 +351,11 @@ func (s *server) resolveConflict(ctx context.Context, _ *mcp.CallToolRequest, in
 
 	h, err := forgerepo.Registry(ctx, s.root).Resolve(path)
 	if err != nil || !forgerepo.IsBinaryHandler(h) {
-		return nil, out, fmt.Errorf("no handler claims %s, so it has no semantic conflicts to decide: resolve git's markers in the working tree as text and stage it with forge_add", path)
+		// What to do instead is not one answer: it depends on whether this
+		// repository expects a handler nobody installed here, and on whether git
+		// left a text merge in that file or one side of it whole. forge_conflicts
+		// reads both for this path rather than this refusal guessing either.
+		return nil, out, fmt.Errorf("no installed handler claims %s, so it has no semantic conflicts to decide — forge_conflicts reports why for this path and what git actually left in the working tree for it, which is what decides whether resolving it is a text edit", path)
 	}
 	out.HandlerID = forgerepo.HandlerFormat(h)
 	out.HandlerBuild = fhr.InstalledHandlerBuild(out.HandlerID)
