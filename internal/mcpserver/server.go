@@ -29,8 +29,9 @@ import (
 
 // version identifies the server to a client. It tracks the tool contract rather
 // than the forge release: a client reads it to know which tool shapes it is
-// talking to. 1.1 adds the write tools; every v1 shape is unchanged.
-const version = "1.1.0"
+// talking to. 1.1 adds the write tools; 1.2 adds the navigation reads and the
+// merge preview. Every shape before them is unchanged.
+const version = "1.2.0"
 
 // defaultMaxChanges caps a change tree when the caller names no cap. A real
 // tree runs to hundreds or thousands of nodes — the handlers cap themselves in
@@ -52,7 +53,13 @@ const toolTimeout = 2 * time.Minute
 // wastes turns probing for a tool that does not exist.
 const instructionsRead = `forge answers semantic questions about files whose format has a handler: what
 changed inside a structured file, which handler claims a path, what a commit
-changed. Plain git can only report that such a file's bytes differ.
+changed, whether two revisions would merge. Plain git can only report that such a
+file's bytes differ.
+
+Nothing here assumes you already know what exists. forge_log walks history and
+marks which of each commit's paths a handler claims; forge_branches lists what a
+revision parameter will take. Both are where the revisions the other tools want
+come from.
 
 Three rules govern every tool here.
 
@@ -267,6 +274,95 @@ max_changes is the whole response's cap and not each file's, so the files listed
 share the roots their summaries may name. For any other pair of revisions, use
 forge_semantic_diff with base and head.`,
 	}, s.show)
+
+	addTool(s, srv, &mcp.Tool{
+		Name:        "forge_log",
+		Annotations: readOnly("History, with what forge can answer about it"),
+		Description: `History as navigation: which commits exist to ask about, and which of each
+commit's files a handler claims here — the subset forge_show and
+forge_semantic_diff can answer semantically for it.
+
+Every revision parameter this server takes assumes the caller already knows what
+exists. This is what says. Answers, per commit: sha, subject, author, date,
+parents, the files it changed, and handledPaths — the claimed subset, each with
+the handler id and installed build. The marking is this repository's own: an
+extension it has not opted in, or has deliberately ignored, is not listed as
+handled even where a handler for it is installed.
+
+ref defaults to HEAD and takes anything git resolves; path narrows to the commits
+that changed one file, as git simplifies history for one. A revision git will not
+resolve is refused by name rather than answered for something else.
+
+max_commits caps the listing at 30 by default, and truncation is explicit:
+truncated carries returned, total and a hint naming the cursor that continues.
+That cursor is ref="<sha>^", the first parent of the last commit returned — call
+again with it for the page after this one. A response that does not say it was
+truncated was not.
+
+A merge commit is listed with no paths. git reports a commit's files against its
+first parent, and for a merge that is nothing; the commit is still here, with its
+parents, to ask about.`,
+	}, s.log)
+
+	addTool(s, srv, &mcp.Tool{
+		Name:        "forge_branches",
+		Annotations: readOnly("Branches, and optionally tags and remote-tracking refs"),
+		Description: `What this repository has to hand a revision parameter: every local branch with
+its tip sha and that commit's subject, and the one HEAD is on marked current.
+
+tags includes tags — an annotated tag reports the commit it points at, not the
+tag object, so the sha is one another tool here will accept. remotes includes
+remote-tracking refs, which are a local read of what the last fetch left on this
+machine; nothing here fetches, and nothing here reaches the network.
+
+Ordering is by ref name, so two calls with the same arguments return the same
+sequence. max_refs caps the whole response and after continues it from a ref name
+a previous response returned; truncation is explicit either way.
+
+A repository with no commits answers rather than failing: it has no branches, and
+the note names the branch HEAD is waiting on.
+
+Creating a branch is forge_create_branch and switching to one is forge_checkout.
+This only reads.`,
+	}, s.branches)
+
+	addTool(s, srv, &mcp.Tool{
+		Name:        "forge_merge_preview",
+		Annotations: readOnly("Whether two revisions would merge, without merging"),
+		Description: `Whether two revisions would merge, and where they would not — before anything is
+merged. This is the answer no other server can give: for a path whose format has
+a handler, the merge is computed inside the file, so "would these conflict" has a
+real answer where git can only say the bytes differ.
+
+Writes nothing, ever. No index, no working tree, no file anywhere in this
+repository. The three sides of every path are read out of history and merged in
+memory, and git's own merge — where it is asked — is asked with what it writes
+redirected outside the repository entirely. Calling this cannot disturb a merge
+in progress, uncommitted work, or anything else, and calling it twice gives the
+same answer.
+
+base is the revision that would be merged into (the side a merge calls "ours");
+head is the revision that would be merged in ("theirs"). Their merge-base is
+computed first, and relation says what was found: identical, contained (head is
+already an ancestor of base, so merging it changes nothing), fast-forward (base is
+an ancestor of head), diverged, or unrelated — no common ancestor, which is a
+merge git itself refuses and forge has no three-way to preview.
+
+For a diverged pair, every path both sides changed is reported. A path a handler
+claims is merged in memory and comes back under files as clean, or with the
+handler's SemanticConflict[] as path/ours/theirs — the same addresses
+forge_conflicts reports and forge_resolve_conflict takes. A path no handler
+claims is under gitDecides instead, with what git's own merge says about it:
+conflict, clean, or notPreviewed where the git installed here could not be asked.
+mergeable is the whole response's roll-up, and "unknown" is never "clean".
+
+A handler that reports it cannot merge is reported saying so, in its own words.
+So is a path one side deletes: that is a disagreement about whether the file
+exists, which is git's to settle and not a handler's.
+
+There is no tool here that starts a merge. Check first, then a human or a shell
+performs it.`,
+	}, s.mergePreview)
 
 	addTool(s, srv, &mcp.Tool{
 		Name:        "forge_handler_for",
