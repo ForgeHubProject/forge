@@ -404,7 +404,8 @@ func TestTheResolutionLoopCompletesAMerge(t *testing.T) {
 	for _, p := range []string{"plain.txt", "minimal.mergeonly", "tilted.lopsided"} {
 		writeFileT(t, filepath.Join(s.root, p), "resolved\n", 0644)
 	}
-	if _, _, err := s.add(ctx, nil, addIn{Paths: []string{"asset.merge", "plain.txt", "minimal.mergeonly", "tilted.lopsided"}}); err != nil {
+	_, staged, err := s.add(ctx, nil, addIn{Paths: []string{"asset.merge", "plain.txt", "minimal.mergeonly", "tilted.lopsided"}})
+	if err != nil {
 		t.Fatal(err)
 	}
 	left, err := s.unmergedPaths(ctx)
@@ -413,6 +414,14 @@ func TestTheResolutionLoopCompletesAMerge(t *testing.T) {
 	}
 	if len(left) != 0 {
 		t.Fatalf("staging a resolved file marks it resolved: %v", left)
+	}
+	// The add that ends the merge says which conflicts it ended — and here none of
+	// them ended as the side already checked out, so it says that by not saying it.
+	if len(staged.Concluded) != 4 || !contains(staged.Concluded, "asset.merge") {
+		t.Fatalf("the add that concluded four conflicts must name them: %+v", staged.Concluded)
+	}
+	if len(staged.TookOurs) != 0 {
+		t.Fatalf("every one of these was staged as something other than ours: %+v", staged.TookOurs)
 	}
 
 	_, done, err := s.commit(ctx, nil, commitIn{Message: "resolve the merge"})
@@ -424,6 +433,87 @@ func TestTheResolutionLoopCompletesAMerge(t *testing.T) {
 	}
 	if s.merging(ctx) {
 		t.Fatal("committing every resolved path concludes the merge")
+	}
+}
+
+// Staging an unmerged path stays available — it is how the loop ends a merge,
+// and forge_resolve_conflict deliberately does not stage — so what is under test
+// is what the call reports having done.
+//
+// A merge leaves the checked-out side in the working tree for a file it could
+// not reconcile itself. Staging that file concludes its conflict with the whole
+// incoming side dropped, and produces an index identical to HEAD's: git status
+// has nothing to say about it, nothing is unmerged any more, and the merge commit
+// that follows records a side that was never in it. The response is the only
+// place any of that can be noticed, and it used to answer "nothing changed for
+// those paths, so the index is as it was".
+func TestAddSaysWhatItConcludedRatherThanThatNothingHappened(t *testing.T) {
+	s := newMergeRepo(t)
+	ctx := context.Background()
+
+	// Exactly what the merge left there, and nothing resolved: forge_conflicts
+	// still reports every conflict, forge_resolve_conflict was never called.
+	for _, path := range []string{"asset.merge", "minimal.mergeonly", "tilted.lopsided", "plain.txt"} {
+		ours, err := forgerepo.GitOutput(ctx, s.root, "show", ":2:"+path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeFileT(t, filepath.Join(s.root, path), string(ours), 0644)
+	}
+
+	_, out, err := s.add(ctx, nil, addIn{Paths: []string{"."}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if left, err := s.unmergedPaths(ctx); err != nil {
+		t.Fatal(err)
+	} else if len(left) != 0 {
+		t.Fatalf("this is the call that concludes a merge and it must still do it: %v", left)
+	}
+	if len(out.Entries) != 0 {
+		t.Fatalf("the index now matches HEAD, which is the whole case here: %+v", out.Entries)
+	}
+	if strings.Contains(out.Note, "the index is as it was") {
+		t.Fatalf("this add dropped four paths' merge stages: %q", out.Note)
+	}
+	if len(out.Concluded) != 4 || !contains(out.Concluded, "asset.merge") {
+		t.Fatalf("every conflict this add ended must be named: %+v", out.Concluded)
+	}
+	if len(out.TookOurs) != 4 {
+		t.Fatalf("each was staged byte-for-byte as ours and the response must say so: %+v", out.TookOurs)
+	}
+	for _, want := range []string{
+		"asset.merge", "no longer unmerged",
+		"byte-for-byte the side already checked out",
+		"a commit now would record a merge without it",
+	} {
+		if !strings.Contains(out.Note, want) {
+			t.Fatalf("the note must say %q: %q", want, out.Note)
+		}
+	}
+
+	// The note names a way back, so it has to be one: while the merge is still in
+	// progress, git can put the sides the add dropped back into the index.
+	if !strings.Contains(out.Note, "git checkout --merge --") {
+		t.Fatalf("the note must name what recovers this: %q", out.Note)
+	}
+	gitT(t, s.root, "checkout", "--merge", "--", "asset.merge")
+	back, err := s.unmergedPaths(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(back, "asset.merge") {
+		t.Fatalf("the recovery the note names must work: %v", back)
+	}
+
+	// The old note is true where it was always true, and stays: what was wrong
+	// was the case it also covered, not the sentence.
+	_, quiet, err := s.add(ctx, nil, addIn{Paths: []string{"notes.txt"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(quiet.Concluded) != 0 || quiet.Note != "nothing changed for those paths, so the index is as it was" {
+		t.Fatalf("an add that really changed nothing: %+v", quiet)
 	}
 }
 

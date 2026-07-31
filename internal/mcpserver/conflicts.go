@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/forgehubproject/forge/internal/fhr"
@@ -410,6 +411,37 @@ func (s *server) indexStages(ctx context.Context, path string) (indexStages, err
 // one of them selects. A caller asking "does this pathspec reach an unmerged
 // path" has to ask it the way the command it is guarding will ask it.
 func (s *server) unmergedPaths(ctx context.Context, pathspecs ...string) ([]string, error) {
+	records, err := s.unmergedRecords(ctx, pathspecs...)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var paths []string
+	for _, r := range records {
+		if seen[r.path] {
+			continue
+		}
+		seen[r.path] = true
+		paths = append(paths, r.path)
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+// unmergedRecord is one of those records: which path, which side of the merge,
+// and the object that side holds. Stage 1 is the common ancestor, 2 the side
+// already checked out, 3 the side being merged in.
+type unmergedRecord struct {
+	path   string
+	stage  int
+	object string
+}
+
+// unmergedRecords reads them in git's order. A record whose head does not parse
+// still counts as a record for its path: what is unmerged is what the index says
+// is unmerged, and a caller asking that question gets the path either way —
+// only the callers that need a side of it are left without one.
+func (s *server) unmergedRecords(ctx context.Context, pathspecs ...string) ([]unmergedRecord, error) {
 	args := []string{"ls-files", "-u", "-z"}
 	if len(pathspecs) > 0 {
 		args = append(append(args, "--"), pathspecs...)
@@ -418,19 +450,22 @@ func (s *server) unmergedPaths(ctx context.Context, pathspecs ...string) ([]stri
 	if err != nil {
 		return nil, err
 	}
-	seen := map[string]bool{}
-	var paths []string
+	var records []unmergedRecord
 	for _, record := range strings.Split(string(out), "\x00") {
 		// <mode> SP <object> SP <stage> TAB <path>
-		_, path, ok := strings.Cut(record, "\t")
-		if !ok || path == "" || seen[path] {
+		head, path, ok := strings.Cut(record, "\t")
+		if !ok || path == "" {
 			continue
 		}
-		seen[path] = true
-		paths = append(paths, path)
+		entry := unmergedRecord{path: path}
+		if fields := strings.Fields(head); len(fields) == 3 {
+			if stage, err := strconv.Atoi(fields[2]); err == nil {
+				entry.stage, entry.object = stage, fields[1]
+			}
+		}
+		records = append(records, entry)
 	}
-	sort.Strings(paths)
-	return paths, nil
+	return records, nil
 }
 
 // writeWorktreeFile replaces one file's content, keeping the mode it already has.

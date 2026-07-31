@@ -395,6 +395,15 @@ refused here: resolve its markers as text and stage it.`,
 resolved file as resolved, which is how the merge loop tells git a conflict is
 settled.
 
+Staging an unmerged path ends its conflict, and the response names every path
+this call ended one for. That transition is worth naming because it is the last
+moment anything can: afterwards the index holds one version of the file where it
+held three, nothing is unmerged, and no tool here — forge_conflicts, forge_status
+— can still tell the path was ever in conflict. When what got staged is
+byte-for-byte the side already checked out, the response says that too: it is a
+conflict concluded with the incoming side dropped whole, and it is the one such
+end state that shows up nowhere else.
+
 Paths are resolved against the repository this server serves and one that points
 outside it is refused. A path is always passed to git as a path and never as a
 flag, so a file whose name begins with "-" stages as itself.

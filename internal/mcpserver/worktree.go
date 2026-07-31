@@ -16,9 +16,11 @@ type addIn struct {
 }
 
 type addOut struct {
-	Staged  []string      `json:"staged" jsonschema:"the paths as they were passed to git, resolved against the repository root"`
-	Entries []statusEntry `json:"entries" jsonschema:"what the index and working tree hold for those paths now, in forge_status's shape"`
-	Note    string        `json:"note,omitempty"`
+	Staged    []string      `json:"staged" jsonschema:"the paths as they were passed to git, resolved against the repository root"`
+	Concluded []string      `json:"concluded,omitempty" jsonschema:"unmerged paths this call settled: staging one is what tells git its conflict is decided, and the sides the index held for it are gone afterwards"`
+	TookOurs  []string      `json:"tookOurs,omitempty" jsonschema:"of those, the paths staged byte-for-byte as the side already checked out, so nothing of the side being merged in is in what was staged"`
+	Entries   []statusEntry `json:"entries" jsonschema:"what the index and working tree hold for those paths now, in forge_status's shape"`
+	Note      string        `json:"note,omitempty"`
 }
 
 // add stages paths. The pathspecs go after "--", so an argument is always a
@@ -32,20 +34,127 @@ func (s *server) add(ctx context.Context, _ *mcp.CallToolRequest, in addIn) (*mc
 	if err != nil {
 		return nil, out, err
 	}
+	// What is unmerged under these pathspecs is asked before the add, because the
+	// add is what takes the answer away: staging a conflicted path drops the sides
+	// the index held for it, and from then on nothing in the repository records
+	// that the path was ever in conflict. The pathspecs are handed to git ls-files
+	// exactly as they are about to be handed to git add, for the reason forge_reset
+	// asks git the same question rather than matching them here.
+	before, err := s.unmergedRecords(ctx, paths...)
+	if err != nil {
+		return nil, out, err
+	}
 	if _, err := forgerepo.GitOutput(ctx, s.root, append([]string{"add", "--"}, paths...)...); err != nil {
 		return nil, out, err
 	}
 	out.Staged = paths
+	if out.Concluded, out.TookOurs, err = s.concludedConflicts(ctx, paths, before); err != nil {
+		return nil, out, err
+	}
 
 	entries, err := s.statusOf(ctx, paths)
 	if err != nil {
 		return nil, out, err
 	}
 	out.Entries = entries
-	if len(entries) == 0 {
+	switch {
+	case len(out.Concluded) > 0:
+		out.Note = concludedNote(out.Concluded, out.TookOurs)
+	case len(entries) == 0:
+		// True here, and the opposite of true one branch up: an add that concludes a
+		// conflict by staging the checked-out side leaves an index identical to
+		// HEAD's, so this is exactly the answer git's status would give for the
+		// largest change to the index short of a commit.
 		out.Note = "nothing changed for those paths, so the index is as it was"
 	}
 	return nil, out, nil
+}
+
+// concludedConflicts reports which unmerged paths the add just settled, and which of
+// those it settled by staging exactly what the checked-out side held.
+//
+// That second list is the one worth a caller's attention: a merge leaves the
+// checked-out side in the working tree for a file it cannot reconcile itself, so
+// an add reaching such a file concludes it with every incoming change dropped —
+// and does it while every other tool here goes quiet, since afterwards nothing is
+// unmerged, no status entry differs from HEAD, and the commit that follows still
+// records both parents.
+//
+// Both lists are read from the index rather than inferred. Still-unmerged is the
+// same question asked again with the same pathspecs, and "the checked-out side"
+// is stage 2's object compared against the object the entry carries now.
+func (s *server) concludedConflicts(ctx context.Context, paths []string, before []unmergedRecord) (concluded, tookOurs []string, err error) {
+	if len(before) == 0 {
+		return nil, nil, nil
+	}
+	after, err := s.unmergedPaths(ctx, paths...)
+	if err != nil {
+		return nil, nil, err
+	}
+	ours := map[string]string{}
+	seen := map[string]bool{}
+	for _, r := range before {
+		if r.stage == 2 {
+			ours[r.path] = r.object
+		}
+		if !seen[r.path] && !contains(after, r.path) {
+			seen[r.path] = true
+			concluded = append(concluded, r.path)
+		}
+	}
+	if len(concluded) == 0 {
+		return nil, nil, nil
+	}
+	sort.Strings(concluded)
+
+	staged, err := s.stagedObjects(ctx, concluded)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, path := range concluded {
+		if o := ours[path]; o != "" && staged[path] == o {
+			tookOurs = append(tookOurs, path)
+		}
+	}
+	return concluded, tookOurs, nil
+}
+
+// stagedObjects reads what the index holds for the given paths now — stage 0,
+// the single version an entry has once it is no longer unmerged. A path staged
+// as a deletion has no entry and so no object, which is not the same as one
+// staged unchanged and must not read as it.
+func (s *server) stagedObjects(ctx context.Context, paths []string) (map[string]string, error) {
+	out, err := forgerepo.GitOutput(ctx, s.root, append([]string{"ls-files", "-s", "-z", "--"}, paths...)...)
+	if err != nil {
+		return nil, err
+	}
+	objects := map[string]string{}
+	for _, record := range strings.Split(string(out), "\x00") {
+		// <mode> SP <object> SP <stage> TAB <path>
+		head, path, ok := strings.Cut(record, "\t")
+		if !ok || path == "" {
+			continue
+		}
+		if fields := strings.Fields(head); len(fields) == 3 && fields[2] == "0" {
+			objects[path] = fields[1]
+		}
+	}
+	return objects, nil
+}
+
+// concludedNote says what the add did to a conflict, because after it nothing
+// else can: forge_conflicts has nothing left to report, forge_status reads clean
+// whether what was staged is a resolution or the file exactly as the merge left
+// it, and forge_commit records a merge either way.
+func concludedNote(concluded, tookOurs []string) string {
+	note := fmt.Sprintf("%s %s no longer unmerged: staging is what tells git a conflict is decided, so the sides the index held for %s are gone and forge_conflicts will not report %s again.",
+		strings.Join(concluded, ", "), plural(len(concluded), "is", "are"),
+		plural(len(concluded), "it", "them"), plural(len(concluded), "it", "them"))
+	if len(tookOurs) > 0 {
+		note += fmt.Sprintf(" What was staged for %s is byte-for-byte the side already checked out, which is what a merge leaves in place for a file it could not reconcile: nothing of the side being merged in is in %s, and a commit now would record a merge without it. While the merge is in progress, `git checkout --merge -- %s` puts the sides back.",
+			strings.Join(tookOurs, ", "), plural(len(tookOurs), "it", "them"), strings.Join(tookOurs, " "))
+	}
+	return note
 }
 
 type commitIn struct {
