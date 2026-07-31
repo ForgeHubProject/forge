@@ -2,12 +2,17 @@ package mcpserver
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/forgehubproject/forge/internal/fhr"
 	"github.com/forgehubproject/forge/internal/forgerepo"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -876,6 +881,60 @@ func TestInstallRefusesWhatNoConfiguredSourceOffers(t *testing.T) {
 	_, _, err = s.install(ctx, nil, installIn{Extension: ".widget"})
 	if err == nil || !strings.Contains(err.Error(), "no handler sources are configured") {
 		t.Fatalf("with no sources at all the refusal should say so: %v", err)
+	}
+}
+
+// forge_install is the only tool that reaches code written for a terminal, and
+// under `forge mcp` this process's stdout is the protocol channel. One line of
+// human text on it is a parse error at the client, which ends the session — and
+// it ends it after the handler is already on disk, so the caller loses both the
+// answer and the connection to a call that did in fact succeed. Nothing this
+// server does may write there; the frames are the only thing that goes to
+// stdout, and everything a human would read goes to stderr.
+func TestInstallLeavesTheProtocolChannelAlone(t *testing.T) {
+	s := newServer(t)
+	ctx := context.Background()
+
+	var manifestURL string
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "manifest.toml") {
+			fmt.Fprintf(w, "name = \"probe\"\n\n[formats]\n\".probe\" = { handler = \"unit-probe\", build = \"deadbee\" }\n\n[assets.handlers.\"unit-probe\"]\n%q = %q\n",
+				fhr.PlatformKey(), strings.TrimSuffix(manifestURL, "manifest.toml")+"handler")
+			return
+		}
+		fmt.Fprint(w, "#!/bin/sh\nexit 0\n")
+	}))
+	defer source.Close()
+	manifestURL = source.URL + "/manifest.toml"
+	writeFileT(t, filepath.Join(os.Getenv("HOME"), ".forge", "sources.list"), "probe\t"+manifestURL+"\n", 0644)
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := os.Stdout
+	os.Stdout = w
+	_, out, installErr := s.install(ctx, nil, installIn{Extension: ".probe"})
+	os.Stdout = saved
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	onStdout, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Close()
+
+	if installErr != nil {
+		t.Fatal(installErr)
+	}
+	// A cached handler skips the download, and it is the download that used to
+	// write: the assertion is only worth anything if that path ran.
+	if !out.Downloaded || fhr.InstalledHandlerBinary("unit-probe") == "" {
+		t.Fatalf("this install must have gone all the way to the download: %+v", out)
+	}
+	if len(onStdout) > 0 {
+		t.Fatalf("forge_install wrote %q to stdout, which under `forge mcp` carries the protocol", onStdout)
 	}
 }
 
