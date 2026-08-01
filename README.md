@@ -252,11 +252,21 @@ layer is reachable by a client and not only by a terminal:
 { "mcpServers": { "forge": { "command": "forge", "args": ["mcp"] } } }
 ```
 
-Six read-only tools: `forge_status`, `forge_semantic_diff`, `forge_show`,
-`forge_handler_for`, `forge_formats`, `forge_source_list`. The revision semantics
-are `forge diff`'s, computed by the same function, so an agent and a terminal get
-the same answer for the same arguments. Every semantic payload carries the
-handler id and the build that produced it.
+Ten read-only tools — the surface `forge mcp --read-only` serves in full:
+`forge_status`, `forge_semantic_diff`, `forge_show`, `forge_handler_for`,
+`forge_formats`, `forge_source_list`, `forge_conflicts`, and three that answer
+what the others assume you already know. `forge_log` walks history and marks, per
+commit, which of its paths a handler claims here, so an agent sees at a glance
+which commits it can ask a semantic question about. `forge_branches` lists local
+branches with their tip and subject and the one checked out marked, and takes
+tags and remote-tracking refs on request — a local read of what the last fetch
+left, since nothing here reaches the network for a ref. `forge_merge_preview`
+says whether two revisions would merge and where they would not, running each
+claimed path's merge in memory and leaving the rest to git, without touching the
+index, the working tree, or anything else in the repository. The revision
+semantics are `forge diff`'s, computed by the same function, so an agent and a
+terminal get the same answer for the same arguments. Every semantic payload
+carries the handler id and the build that produced it.
 
 Responses are paginated on purpose. A change tree can be enormous, so a call
 returns a summary plus a capped, depth-first slice of the tree and

@@ -115,11 +115,12 @@ func TestSessionAdvertisesEveryToolAnnotated(t *testing.T) {
 
 	tools, names := toolsOf(t, session)
 	want := []string{
-		"forge_add", "forge_checkout", "forge_commit", "forge_conflicts",
-		"forge_create_branch", "forge_formats", "forge_formats_add",
-		"forge_formats_ignore", "forge_handler_for", "forge_install",
-		"forge_reset", "forge_resolve_conflict", "forge_semantic_diff",
-		"forge_show", "forge_source_list", "forge_status",
+		"forge_add", "forge_branches", "forge_checkout", "forge_commit",
+		"forge_conflicts", "forge_create_branch", "forge_formats",
+		"forge_formats_add", "forge_formats_ignore", "forge_handler_for",
+		"forge_install", "forge_log", "forge_merge_preview", "forge_reset",
+		"forge_resolve_conflict", "forge_semantic_diff", "forge_show",
+		"forge_source_list", "forge_status",
 	}
 	if strings.Join(names, ",") != strings.Join(want, ",") {
 		t.Fatalf("tools = %s, want %s", strings.Join(names, ","), strings.Join(want, ","))
@@ -199,8 +200,16 @@ func TestReadOnlyModeServesExactlyTheReadOnlyAnnotatedTools(t *testing.T) {
 			t.Errorf("--read-only must keep serving %s, the surface v1 shipped", name)
 		}
 	}
-	if len(tools) != len(v1Tools)+1 {
-		t.Errorf("read-only serves %d tools: the v1 six plus forge_conflicts, which writes nothing", len(tools))
+	// The reads added since v1, each of which writes nothing and so grows this
+	// surface without a line of filter logic changing: forge_conflicts (#50), and
+	// the navigation and preview tools (#52).
+	for _, name := range []string{"forge_conflicts", "forge_log", "forge_branches", "forge_merge_preview"} {
+		if _, served := tools[name]; !served {
+			t.Errorf("--read-only must serve %s: it is annotated read-only", name)
+		}
+	}
+	if len(tools) != len(v1Tools)+4 {
+		t.Errorf("read-only serves %d tools: the v1 six plus the four reads added since", len(tools))
 	}
 
 	// A write tool is not merely hidden: calling it by name fails.
@@ -354,6 +363,9 @@ func TestSessionAnswersConcurrentCalls(t *testing.T) {
 		{"forge_show", map[string]any{"ref": "HEAD"}},
 		{"forge_source_list", map[string]any{}},
 		{"forge_conflicts", map[string]any{}},
+		{"forge_log", map[string]any{}},
+		{"forge_branches", map[string]any{"tags": true, "remotes": true}},
+		{"forge_merge_preview", map[string]any{"base": "HEAD", "head": "HEAD~1"}},
 	}
 
 	// Released together, so the calls reach the shared state at the same moment
