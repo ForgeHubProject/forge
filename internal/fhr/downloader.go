@@ -71,7 +71,10 @@ func DownloadHandler(m *FHRManifest, handlerID, sourceURL string) (string, error
 	}
 	binaryPath := filepath.Join(pluginsDir, binaryName)
 
-	fmt.Printf("Downloading %s...\n", binaryName)
+	// Progress goes to stderr, never stdout: this runs under `forge mcp` too,
+	// where stdout is the protocol channel and one non-JSON line on it ends the
+	// session for the client that was about to be told the install succeeded.
+	fmt.Fprintf(os.Stderr, "Downloading %s...\n", binaryName)
 	binaryHash, err := downloadFile(assetURL, binaryPath)
 	if err != nil {
 		return "", fmt.Errorf("downloading %s: %w", binaryName, err)

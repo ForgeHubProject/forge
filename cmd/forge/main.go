@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -18,23 +19,34 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/forgehubproject/forge/internal/credential"
+	"github.com/forgehubproject/forge/internal/fhr"
+	"github.com/forgehubproject/forge/internal/forgerepo"
+	"github.com/forgehubproject/forge/internal/gitrepo"
+	"github.com/forgehubproject/forge/internal/handler"
+	"github.com/forgehubproject/forge/internal/mcpserver"
+	"github.com/forgehubproject/forge/internal/webdiff"
 	gogit "github.com/go-git/go-git/v5"
+	gogitconfig "github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing/transport"
 	gogithttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	gogitssh "github.com/go-git/go-git/v5/plumbing/transport/ssh"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
-	"github.com/forgehubproject/forge/internal/credential"
-	"github.com/forgehubproject/forge/internal/fhr"
-	"github.com/forgehubproject/forge/internal/gitrepo"
-	"github.com/forgehubproject/forge/internal/handler"
-	"github.com/forgehubproject/forge/internal/handler/text"
-	"github.com/forgehubproject/forge/internal/webdiff"
 )
 
 func main() {
 	if err := rootCmd().Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+// defaultRegistry builds the handler registry for the repository the command
+// was run in. A command's handler subprocesses are bound to no context narrower
+// than the process: they live as long as the command does, and a terminal's
+// interrupt reaches them through the process group.
+func defaultRegistry() *handler.Registry {
+	return forgerepo.Registry(context.Background(), forgerepo.FindRoot())
 }
 
 func rootCmd() *cobra.Command {
@@ -49,6 +61,7 @@ func rootCmd() *cobra.Command {
 		cloneCmd(),
 		statusCmd(),
 		diffCmd(),
+		showCmd(),
 		mergeCmd(),
 		mergeFileCmd(),
 		mergeToolCmd(),
@@ -57,6 +70,7 @@ func rootCmd() *cobra.Command {
 		pullCmd(),
 		sourceCmd(),
 		formatsCmd(),
+		mcpCmd(),
 		gitPassthrough("add", "Stage file contents (delegates to git)"),
 		gitPassthrough("commit", "Record staged changes (delegates to git)"),
 		gitPassthrough("branch", "List, create or delete branches (delegates to git)"),
@@ -69,230 +83,11 @@ func rootCmd() *cobra.Command {
 		gitPassthrough("rebase", "Reapply commits on top of another branch (delegates to git)"),
 		gitPassthrough("tag", "Create, list or delete tags (delegates to git)"),
 		gitPassthrough("remote", "Manage remote connections (delegates to git)"),
+		// Identity and git options live in git's config — the single source of
+		// truth forge reads through (issue #30). No forge-side config store.
+		gitPassthrough("config", "Get and set repository or global options (delegates to git)"),
 	)
 	return root
-}
-
-// defaultRegistry builds the handler registry for the current repo.
-func defaultRegistry() *handler.Registry {
-	reg := handler.NewRegistry()
-
-	repoDir := findRepoRoot()
-	forgeFormats := loadForgeFormats(repoDir)
-
-	for _, meta := range fhr.LoadInstalledHandlers() {
-		binary := fhr.InstalledHandlerBinary(meta.ID)
-		if binary == "" {
-			fmt.Fprintf(os.Stderr, "forge: warning: handler %q metadata found but binary missing\n", meta.ID)
-			continue
-		}
-		if len(forgeFormats) > 0 {
-			wanted := false
-			for _, ext := range meta.Formats {
-				if forgeFormats[strings.ToLower(ext)] {
-					wanted = true
-					break
-				}
-			}
-			if !wanted {
-				continue
-			}
-		}
-		reg.Register(fhr.NewSubprocessHandler(binary, meta))
-	}
-
-	reg.Register(text.New())
-	return reg
-}
-
-func findRepoRoot() string {
-	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
-	if err != nil {
-		return "."
-	}
-	return strings.TrimSpace(string(out))
-}
-
-// Per-repo forge files live in .forge/ ("formats" and the "handlers" lockfile).
-// The legacy root-level names (.forge-formats, .forge-handlers) are still read
-// when .forge/ has no copy; any write migrates the legacy file first.
-const forgeRepoDir = ".forge"
-
-var legacyFileWarned = map[string]bool{}
-
-// perRepoFilePath resolves a per-repo forge file for reading: the .forge/
-// location wins, otherwise a legacy root-level file is used if present.
-func perRepoFilePath(repoDir, name, legacyName string) string {
-	current := filepath.Join(repoDir, forgeRepoDir, name)
-	if _, err := os.Stat(current); err == nil {
-		return current
-	}
-	legacy := filepath.Join(repoDir, legacyName)
-	if _, err := os.Stat(legacy); err == nil {
-		if !legacyFileWarned[legacyName] {
-			legacyFileWarned[legacyName] = true
-			fmt.Fprintf(os.Stderr, "forge: note: %s now lives at %s/%s; it will be moved automatically on the next forge write\n", legacyName, forgeRepoDir, name)
-		}
-		return legacy
-	}
-	return current
-}
-
-// migratePerRepoFile prepares a per-repo forge file for writing: ensures
-// .forge/ exists and moves a legacy root-level file into it if one is present.
-func migratePerRepoFile(repoDir, name, legacyName string) (string, error) {
-	if err := os.MkdirAll(filepath.Join(repoDir, forgeRepoDir), 0755); err != nil {
-		return "", err
-	}
-	current := filepath.Join(repoDir, forgeRepoDir, name)
-	if _, err := os.Stat(current); err == nil {
-		return current, nil
-	}
-	legacy := filepath.Join(repoDir, legacyName)
-	if _, err := os.Stat(legacy); err == nil {
-		if err := os.Rename(legacy, current); err != nil {
-			return "", fmt.Errorf("migrating %s to %s/%s: %w", legacyName, forgeRepoDir, name, err)
-		}
-		fmt.Fprintf(os.Stderr, "forge: migrated %s → %s/%s — remember to commit this move\n", legacyName, forgeRepoDir, name)
-	}
-	return current, nil
-}
-
-func loadForgeFormats(repoDir string) map[string]bool {
-	data, err := os.ReadFile(perRepoFilePath(repoDir, "formats", ".forge-formats"))
-	if err != nil {
-		return nil
-	}
-	exts := map[string]bool{}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		// A leading '!' marks an ignored format — tracked by git but deliberately
-		// given no handler; it is not an active/included extension.
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "!") {
-			continue
-		}
-		if !strings.HasPrefix(line, ".") {
-			line = "." + line
-		}
-		exts[strings.ToLower(line)] = true
-	}
-	return exts
-}
-
-// loadIgnoredFormats returns the extensions the repo has explicitly ignored
-// (lines prefixed with '!' in .forge/formats).
-func loadIgnoredFormats(repoDir string) map[string]bool {
-	data, err := os.ReadFile(perRepoFilePath(repoDir, "formats", ".forge-formats"))
-	if err != nil {
-		return nil
-	}
-	exts := map[string]bool{}
-	for _, line := range strings.Split(string(data), "\n") {
-		ext, marker := parseFormatLine(strings.TrimSpace(line))
-		if marker == "!" && ext != "" {
-			exts[ext] = true
-		}
-	}
-	return exts
-}
-
-// parseFormatLine normalizes one .forge/formats line into (ext, marker), where
-// marker is "!" for an ignored entry or "" for an included one. Comment and
-// blank lines yield ("", ""). The returned ext is lower-cased and dot-prefixed.
-func parseFormatLine(trimmed string) (ext, marker string) {
-	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-		return "", ""
-	}
-	s := trimmed
-	if strings.HasPrefix(s, "!") {
-		marker = "!"
-		s = strings.TrimSpace(s[1:])
-	}
-	if s == "" {
-		return "", marker
-	}
-	if !strings.HasPrefix(s, ".") {
-		s = "." + s
-	}
-	return strings.ToLower(s), marker
-}
-
-// setForgeFormat rewrites .forge/formats so ext carries exactly the given marker
-// ("" = included, "!" = ignored), replacing any existing entry for ext (so
-// add<->ignore flips cleanly). Comments and blank lines are preserved. Returns
-// whether the file content changed.
-func setForgeFormat(repoDir, ext, marker string) (bool, error) {
-	path, err := migratePerRepoFile(repoDir, "formats", ".forge-formats")
-	if err != nil {
-		return false, err
-	}
-	existing, _ := os.ReadFile(path)
-
-	lines := strings.Split(string(existing), "\n")
-	// Drop the trailing empty element a final newline produces, so re-adding
-	// doesn't insert a phantom blank line.
-	if len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
-
-	var out []string
-	changed := false
-	kept := false
-	for _, line := range lines {
-		e, m := parseFormatLine(strings.TrimSpace(line))
-		if e == ext && e != "" {
-			if m == marker && !kept {
-				kept = true
-				out = append(out, marker+ext) // normalize spacing/case
-				if strings.TrimSpace(line) != marker+ext {
-					changed = true
-				}
-			} else {
-				changed = true // drop a wrong-marker or duplicate entry
-			}
-			continue
-		}
-		out = append(out, line)
-	}
-	if !kept {
-		out = append(out, marker+ext)
-		changed = true
-	}
-	if !changed {
-		return false, nil
-	}
-	content := strings.Join(out, "\n")
-	if content != "" {
-		content += "\n"
-	}
-	return true, os.WriteFile(path, []byte(content), 0644)
-}
-
-// loadForgeHandlers reads the .forge/handlers lockfile and returns
-// handlerID → pinned build (nil = unpinned).
-func loadForgeHandlers(repoDir string) map[string]*string {
-	data, err := os.ReadFile(perRepoFilePath(repoDir, "handlers", ".forge-handlers"))
-	if err != nil {
-		return map[string]*string{}
-	}
-	var m map[string]*string
-	if err := json.Unmarshal(data, &m); err != nil {
-		return map[string]*string{}
-	}
-	return m
-}
-
-// saveForgeHandlers writes the .forge/handlers lockfile.
-func saveForgeHandlers(repoDir string, m map[string]*string) error {
-	path, err := migratePerRepoFile(repoDir, "handlers", ".forge-handlers")
-	if err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, append(data, '\n'), 0644)
 }
 
 // ── forge init ──────────────────────────────────────────────────────────────────────────────────────
@@ -328,7 +123,7 @@ func runInit(_ *cobra.Command, args []string) error {
 func setupGitMergeDriver(repoDir string) error {
 	attrPath := filepath.Join(repoDir, ".gitattributes")
 	existing, _ := os.ReadFile(attrPath)
-	forgeFormats := loadForgeFormats(repoDir)
+	forgeFormats := forgerepo.LoadForgeFormats(repoDir)
 	var toAdd []string
 	for ext := range forgeFormats {
 		entry := "*" + ext + "  merge=forge"
@@ -403,6 +198,14 @@ func runStatus(_ *cobra.Command, _ []string) error {
 		}
 	}
 
+	// Surface .forge/formats drift (issue #34): a listed format with no
+	// installed handler is silently inactive — flag it with the repair command.
+	if missing := missingHandlerExts(cwd); len(missing) > 0 {
+		fmt.Printf("\x1b[33mwarning:\x1b[0m formats listed in .forge/formats with no installed handler: %s\n",
+			strings.Join(missing, ", "))
+		fmt.Println("         install them with: forge formats install")
+	}
+
 	wt, err := r.Worktree()
 	if err != nil {
 		return err
@@ -426,12 +229,13 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	}
 	sort.Strings(paths)
 
-	var stagedPaths, unstagedPaths, untrackedPaths []string
+	var stagedPaths, unstagedPaths []string
 	for _, p := range paths {
 		fs := st[p]
 		s, w := rune(fs.Staging), rune(fs.Worktree)
 		if s == '?' && w == '?' {
-			untrackedPaths = append(untrackedPaths, p)
+			// Untracked files come from git below — go-git's Status() has only
+			// partial .gitignore support and doesn't collapse untracked dirs.
 			continue
 		}
 		if s != ' ' && s != '?' {
@@ -440,6 +244,19 @@ func runStatus(_ *cobra.Command, _ []string) error {
 		if w != ' ' && w != '?' {
 			unstagedPaths = append(unstagedPaths, p)
 		}
+	}
+
+	// Untracked list defers to git for the full ignore stack (.gitignore, nested
+	// .gitignores, .git/info/exclude, core.excludesFile) and git's directory
+	// collapsing — the source of truth forge wraps. Path-level ignoring is
+	// .gitignore's job; forge's own ignoring is format-level (forge formats ignore).
+	untrackedPaths := gitUntrackedFiles(cwd)
+
+	// go-git may report "not clean" purely because of ignored files it surfaces
+	// as untracked; if git disagrees and there are no real changes, we're clean.
+	if len(stagedPaths) == 0 && len(unstagedPaths) == 0 && len(untrackedPaths) == 0 {
+		fmt.Println("nothing to commit, working tree clean")
+		return nil
 	}
 
 	statusWord := func(code rune) string {
@@ -470,6 +287,12 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	}
 
 	printUntrackedEntry := func(p string) {
+		// git collapses a wholly-untracked directory to "dir/" — no per-file
+		// handler applies, so print it bare, matching git.
+		if strings.HasSuffix(p, "/") {
+			fmt.Printf("\x1b[31m\t%-49s\x1b[0m\n", p)
+			return
+		}
 		label := handlerLabel(p, reg)
 		fmt.Printf("\x1b[31m\t%-49s\x1b[0m %s\n", p, label)
 	}
@@ -503,6 +326,33 @@ func runStatus(_ *cobra.Command, _ []string) error {
 	}
 
 	return nil
+}
+
+// gitUntrackedFiles returns the untracked paths git itself would show —
+// respecting the full ignore stack (.gitignore, nested .gitignores,
+// .git/info/exclude, core.excludesFile) and collapsing wholly-untracked
+// directories to a single "dir/" entry, exactly like `git status`. forge wraps
+// git and stores git objects, so it defers to git's ignore semantics rather
+// than go-git's partial Status() implementation.
+func gitUntrackedFiles(dir string) []string {
+	root := dir
+	if top, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").Output(); err == nil {
+		root = strings.TrimSpace(string(top))
+	}
+	cmd := exec.Command("git", "ls-files", "--others", "--exclude-standard", "--directory", "--no-empty-directory")
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	var paths []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line != "" {
+			paths = append(paths, line)
+		}
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 func handlerLabel(path string, reg *handler.Registry) string {
@@ -636,7 +486,15 @@ func runClone(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Cloning into '%s'...\n", dir)
 
 	_, err = gogit.PlainClone(dir, false, cloneOpts)
-	if err != nil {
+	if errors.Is(err, transport.ErrEmptyRemoteRepository) {
+		// Match git: cloning a freshly-created empty repo is a normal first
+		// step, not a failure. Leave an initialized local repo with `origin`
+		// configured so the usual add/commit/push flow works.
+		fmt.Println("warning: You appear to have cloned an empty repository.")
+		if initErr := initEmptyClone(dir, rawURL); initErr != nil {
+			return fmt.Errorf("clone failed: %w", initErr)
+		}
+	} else if err != nil {
 		return fmt.Errorf("clone failed: %w", err)
 	}
 
@@ -646,6 +504,26 @@ func runClone(cmd *cobra.Command, args []string) error {
 
 	reportMissingHandlers(dir)
 	return nil
+}
+
+// initEmptyClone recovers from go-git's ErrEmptyRemoteRepository: depending on
+// the version, PlainClone may or may not have left a usable repo behind, so
+// open-or-init the directory and make sure the `origin` remote is registered.
+func initEmptyClone(dir, rawURL string) error {
+	repo, err := gogit.PlainOpen(dir)
+	if err != nil {
+		if repo, err = gogit.PlainInit(dir, false); err != nil {
+			return err
+		}
+	}
+	if _, err := repo.Remote("origin"); err == nil {
+		return nil // PlainClone already registered it
+	}
+	_, err = repo.CreateRemote(&gogitconfig.RemoteConfig{
+		Name: "origin",
+		URLs: []string{rawURL},
+	})
+	return err
 }
 
 func buildCloneOptions(rawURL, token, sshKeyPath, sshPassword string) (*gogit.CloneOptions, error) {
@@ -764,7 +642,54 @@ func runLogin(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Logged in as %s.\n", email)
 	fmt.Printf("Credential stored via git's credential helper — git and forge will use it automatically for %s.\n", baseURL)
+
+	if info, err := fetchServerInfo(baseURL); err == nil && info.SSHEnabled {
+		host := info.SSHHost
+		if host == "" {
+			if u, err := url.Parse(baseURL); err == nil {
+				host = u.Hostname()
+			}
+		}
+		port := 22
+		if info.SSHPort != 0 {
+			port = info.SSHPort
+		}
+		fmt.Printf("\nSSH is enabled on this server (port %d).\n", port)
+		if info.SSHFingerprint != "" {
+			fmt.Printf("Host key fingerprint: %s\n", info.SSHFingerprint)
+		}
+		fmt.Printf("To trust this server's host key, run:\n")
+		fmt.Printf("  ssh-keyscan -p %d %s >> ~/.ssh/known_hosts\n", port, host)
+	}
+
 	return nil
+}
+
+type serverInfo struct {
+	SSHEnabled     bool   `json:"sshEnabled"`
+	SSHPort        int    `json:"sshPort"`
+	SSHHost        string `json:"sshHost"`
+	SSHFingerprint string `json:"sshFingerprint"`
+}
+
+func fetchServerInfo(baseURL string) (*serverInfo, error) {
+	resp, err := http.Get(baseURL + "/server/info")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("server returned %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var info serverInfo
+	if err := json.Unmarshal(data, &info); err != nil {
+		return nil, err
+	}
+	return &info, nil
 }
 
 func forgeHubLogin(baseURL, email, password string) (string, error) {
@@ -864,10 +789,13 @@ func defaultSSHKey() string {
 	return filepath.Join(home, ".ssh", "id_ed25519")
 }
 
-func reportMissingHandlers(repoDir string) {
-	forgeFormats := loadForgeFormats(repoDir)
+// missingHandlerExts returns the extensions listed in .forge/formats that no
+// installed handler covers — the "half-configured repo" drift that clone and
+// status both warn about (issue #34).
+func missingHandlerExts(repoDir string) []string {
+	forgeFormats := forgerepo.LoadForgeFormats(repoDir)
 	if len(forgeFormats) == 0 {
-		return
+		return nil
 	}
 
 	covered := map[string]bool{}
@@ -883,16 +811,22 @@ func reportMissingHandlers(repoDir string) {
 			missing = append(missing, ext)
 		}
 	}
+	sort.Strings(missing)
+	return missing
+}
+
+func reportMissingHandlers(repoDir string) {
+	missing := missingHandlerExts(repoDir)
 	if len(missing) == 0 {
 		return
 	}
 
-	sort.Strings(missing)
 	fmt.Println()
 	fmt.Println("This repository requires format handlers that are not installed:")
 	for _, ext := range missing {
-		fmt.Printf("  forge formats add %s\n", ext)
+		fmt.Printf("  %s\n", ext)
 	}
+	fmt.Println("Install them all with: forge formats install")
 	fmt.Println()
 }
 
@@ -912,10 +846,19 @@ func repoNameFromURL(url string) string {
 
 func diffCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "diff [file]",
-		Short: "Show semantic diff between working tree and HEAD",
-		Args:  cobra.MaximumNArgs(1),
-		RunE:  runDiff,
+		Use:   "diff [<revision> [<revision>]] [--] [<path>...]",
+		Short: "Show semantic diff between the working tree and a revision, or between two revisions",
+		Long: `Shows a semantic diff for every changed path a format handler claims, and
+git's own text diff for the rest.
+
+  forge diff                  the working tree against HEAD
+  forge diff <revision>       the working tree against a revision
+  forge diff <base> <head>    revision to revision
+
+Paths may follow the revisions. Use "--" when an argument is both a revision
+and a filename, and to name a path the working tree does not have.`,
+		Args: cobra.ArbitraryArgs,
+		RunE: runDiff,
 	}
 	cmd.Flags().Bool("web", false, "Render the diff in a local browser using the format's FHR renderer")
 	cmd.Flags().Bool("no-open", false, "With --web, print the URL but do not launch a browser")
@@ -932,22 +875,50 @@ func runDiff(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	repoDir := forgerepo.FindRoot()
 
 	reg := defaultRegistry()
 
+	args, dashAt := forgerepo.ExpandRevRange(context.Background(), repoDir, args, cmd.ArgsLenAtDash())
+	revs, rawPaths, err := forgerepo.SplitRevsAndPaths(context.Background(), repoDir, args, dashAt)
+	if err != nil {
+		return err
+	}
+	base, head, err := forgerepo.DiffSources(context.Background(), repoDir, revs)
+	if err != nil {
+		return err
+	}
+	paths, err := forgerepo.RelPaths(repoDir, rawPaths)
+	if err != nil {
+		return err
+	}
+
 	if web, _ := cmd.Flags().GetBool("web"); web {
-		if len(args) != 1 {
+		if len(paths) != 1 {
 			return fmt.Errorf("forge diff --web needs exactly one file to render")
 		}
 		noOpen, _ := cmd.Flags().GetBool("no-open")
-		return diffFileWeb(repo, reg, cleanPath(args[0]), !noOpen)
+		return diffFileWeb(repoDir, reg, paths[0], base, head, !noOpen)
 	}
 
-	if len(args) == 1 {
-		return diffFile(repo, reg, cleanPath(args[0]))
+	if len(paths) > 0 {
+		files, err := forgerepo.ComparePaths(context.Background(), repoDir, base, head, paths)
+		if err != nil {
+			return err
+		}
+		return renderPaths(files, func(path string) error {
+			return diffFile(repoDir, reg, path, base, head)
+		})
 	}
 
-	changed, err := repo.ChangedFiles()
+	var changed []string
+	if len(revs) == 0 {
+		// go-git's status, which also surfaces files the working tree has and
+		// HEAD does not — untracked work a revision listing cannot report.
+		changed, err = repo.ChangedFiles()
+	} else {
+		changed, err = forgerepo.ChangedPaths(context.Background(), repoDir, base, head, nil)
+	}
 	if err != nil {
 		return err
 	}
@@ -955,11 +926,12 @@ func runDiff(cmd *cobra.Command, args []string) error {
 		fmt.Println("no changes")
 		return nil
 	}
-	for _, path := range changed {
-		if err := diffFile(repo, reg, path); err != nil {
-			fmt.Fprintf(os.Stderr, "forge: %s: %v\n", path, err)
-		}
-	}
+	// A survey of everything that changed reports the paths it could not read and
+	// still exits zero, as forge diff did before it took revisions; only a path
+	// the caller named carries its failure into the exit status.
+	_ = renderPaths(changed, func(path string) error {
+		return diffFile(repoDir, reg, path, base, head)
+	})
 	return nil
 }
 
@@ -967,86 +939,64 @@ func cleanPath(p string) string {
 	return filepath.ToSlash(filepath.Clean(p))
 }
 
-func diffFile(repo *gitrepo.Repo, reg *handler.Registry, path string) error {
-	path = cleanPath(path)
-	h, err := reg.Resolve(path)
+// diffFile renders one path's change between two sources: the handler's change
+// tree, or git's own text diff for a path no handler claims. An error is the
+// caller's to report — one unreadable path does not end a multi-path diff.
+func diffFile(repoDir string, reg *handler.Registry, path string, base, head forgerepo.Source) error {
+	fc, err := forgerepo.CompareFile(context.Background(), repoDir, reg, path, base, head)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "forge: %v\n", err)
-		return nil
+		return err
 	}
 
-	if n, ok := h.(interface{ Format() string }); ok && n.Format() == "text" {
-		c := exec.Command("git", "diff", "HEAD", "--", path)
+	switch {
+	case !fc.BaseFound && !fc.HeadFound:
+		fmt.Printf("%s: not in %s or %s\n", path, base, head)
+	case !fc.Semantic:
+		c := exec.Command("git", forgerepo.GitDiffArgs(base, head, nil, []string{path})...)
+		c.Dir = repoDir
 		c.Stdout = os.Stdout
 		c.Stderr = os.Stderr
 		_ = c.Run()
-		return nil
+	default:
+		renderDiff(path, fc.Diff)
 	}
-
-	base, err := repo.BlobAtHEAD(filepath.ToSlash(path))
-	if err != nil {
-		return fmt.Errorf("reading HEAD blob for %s: %w", path, err)
-	}
-
-	head, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("reading working tree file %s: %w", path, err)
-	}
-
-	diff, err := h.Diff(base, head)
-	if err != nil {
-		return fmt.Errorf("diff %s: %w", path, err)
-	}
-
-	renderDiff(path, diff)
 	return nil
 }
 
 // diffFileWeb computes the semantic diff locally and serves it to a loopback
 // browser page rendered by the format's FHR renderer bundle (SPEC-RENDERING §3b).
-func diffFileWeb(repo *gitrepo.Repo, reg *handler.Registry, path string, openBrowser bool) error {
-	path = cleanPath(path)
-	h, err := reg.Resolve(path)
+func diffFileWeb(repoDir string, reg *handler.Registry, path string, base, head forgerepo.Source, openBrowser bool) error {
+	fc, err := forgerepo.CompareFile(context.Background(), repoDir, reg, path, base, head)
 	if err != nil {
 		return err
 	}
-	namer, ok := h.(handler.Namer)
-	if !ok || namer.Format() == "text" {
+	if !fc.Semantic {
 		return fmt.Errorf("--web needs a semantic handler; %s has none — use plain: forge diff %s", path, path)
 	}
-	handlerID := namer.Format()
-
-	base, err := repo.BlobAtHEAD(filepath.ToSlash(path))
-	if err != nil {
-		return fmt.Errorf("reading HEAD blob for %s: %w", path, err)
-	}
-	head, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("reading working tree file %s: %w", path, err)
+	if !fc.BaseFound && !fc.HeadFound {
+		return fmt.Errorf("%s is not in %s or %s", path, base, head)
 	}
 
-	diff, err := h.Diff(base, head)
-	if err != nil {
-		return fmt.Errorf("diff %s: %w", path, err)
-	}
-	diffJSON, err := json.Marshal(diff)
+	diffJSON, err := json.Marshal(fc.Diff)
 	if err != nil {
 		return fmt.Errorf("encoding diff: %w", err)
 	}
 
-	rendererPath, err := ensureRenderer(handlerID)
+	rendererPath, err := ensureRenderer(fc.HandlerID)
 	if err != nil {
 		return err
 	}
 
 	return webdiff.Serve(webdiff.Payload{
 		FilePath:   path,
-		HandlerID:  handlerID,
+		HandlerID:  fc.HandlerID,
 		Mode:       "diff",
+		Compare:    fmt.Sprintf("%s → %s", base, head),
 		DiffJSON:   diffJSON,
 		RendererJS: rendererPath,
-		Base:       base,
-		Head:       head,
+		Renderer3D: fhr.InstalledRenderer3D(fc.HandlerID),
+		Base:       fc.Base,
+		Head:       fc.Head,
 	}, openBrowser)
 }
 
@@ -1200,7 +1150,7 @@ func runMergeTool(_ *cobra.Command, args []string) error {
 		fmt.Printf("\nMerging %s\n", f)
 
 		h, _ := reg.Resolve(f)
-		isBinary := h != nil && isBinaryHandler(h)
+		isBinary := h != nil && forgerepo.IsBinaryHandler(h)
 
 		if isBinary {
 			if resolveInteractive(f, h) {
@@ -1301,11 +1251,6 @@ func hasConflictMarkers(path string) bool {
 	return bytes.Contains(data, []byte("<<<<<<<"))
 }
 
-func isBinaryHandler(h handler.ForgeHandler) bool {
-	n, ok := h.(handler.Namer)
-	return ok && n.Format() != "text"
-}
-
 func resolveInteractive(path string, h handler.ForgeHandler) bool {
 	sidecarPath := path + ".forge-conflict"
 	raw, err := os.ReadFile(sidecarPath)
@@ -1331,16 +1276,7 @@ func resolveInteractive(path string, h handler.ForgeHandler) bool {
 
 	applier, canApply := h.(handler.ConflictApplier)
 	if !canApply {
-		fmt.Printf("Conflicts in %s:\n", path)
-		for _, c := range sc.Conflicts {
-			fmt.Printf("  %s\n    current:  %v\n    incoming: %v\n", c.Path, c.Ours, c.Theirs)
-		}
-		fmt.Printf("Resolve in your tool and re-export, then 'git add %s'.\n", path)
-		resolved := promptConfirm(fmt.Sprintf("Mark %s as resolved?", path))
-		if resolved {
-			cleanupMergeTempFiles(path)
-		}
-		return resolved
+		return promptManualResolve(path, sc.Conflicts)
 	}
 
 	n := len(sc.Conflicts)
@@ -1393,6 +1329,22 @@ func resolveInteractive(path string, h handler.ForgeHandler) bool {
 	}
 }
 
+// promptManualResolve is the route out when forge cannot apply the choices
+// itself: the conflicts are printed for the human to act on in their own tool,
+// and they say whether the file is resolved.
+func promptManualResolve(path string, conflicts []handler.SemanticConflict) bool {
+	fmt.Printf("Conflicts in %s:\n", path)
+	for _, c := range conflicts {
+		fmt.Printf("  %s\n    current:  %v\n    incoming: %v\n", c.Path, c.Ours, c.Theirs)
+	}
+	fmt.Printf("Resolve in your tool and re-export, then 'git add %s'.\n", path)
+	resolved := promptConfirm(fmt.Sprintf("Mark %s as resolved?", path))
+	if resolved {
+		cleanupMergeTempFiles(path)
+	}
+	return resolved
+}
+
 func applyConflictChoices(path, sidecarPath string, sc handler.ConflictSidecar, choices []bool, applier handler.ConflictApplier) bool {
 	fmt.Printf("\nSummary for %s:\n", path)
 	var takePaths []string
@@ -1409,20 +1361,29 @@ func applyConflictChoices(path, sidecarPath string, sc handler.ConflictSidecar, 
 		return false
 	}
 
-	theirsBlob, err := base64.StdEncoding.DecodeString(sc.TheirsB64)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "forge: could not decode theirs blob: %v\n", err)
-		return false
-	}
 	merged, err := os.ReadFile(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "forge: could not read %s: %v\n", path, err)
 		return false
 	}
-	result, err := applier.ApplyChoices(merged, theirsBlob, takePaths)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "forge: ApplyChoices failed: %v\n", err)
-		return false
+	// Keeping every conflict at current is the merged file already on disk: the
+	// merge left the current side wherever it could not reconcile. There is
+	// nothing for the handler to apply, so it is not asked — a call that can only
+	// return what is already here is one more thing that can fail.
+	result := merged
+	if len(takePaths) > 0 {
+		theirsBlob, err := base64.StdEncoding.DecodeString(sc.TheirsB64)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "forge: could not decode the incoming side: %v\n", err)
+			return false
+		}
+		if result, err = applier.ApplyChoices(merged, theirsBlob, takePaths); err != nil {
+			// The interface says a handler can apply choices; it does not promise the
+			// attempt succeeds. Either way the choices could not be applied here, so
+			// the same route out is offered as for a handler that never had it.
+			fmt.Fprintf(os.Stderr, "forge: %s could not apply these choices: %v\n", sc.Handler, err)
+			return promptManualResolve(path, sc.Conflicts)
+		}
 	}
 	if err := os.WriteFile(path, result, 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "forge: could not write %s: %v\n", path, err)
@@ -1703,6 +1664,41 @@ func runMergeFile(_ *cobra.Command, args []string) error {
 	return nil
 }
 
+// ── forge mcp ───────────────────────────────────────────────────────────────────────────────────────
+
+func mcpCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "mcp",
+		Short: "Serve this repository to an MCP client over stdio",
+		Long: `Runs a Model Context Protocol server over stdin and stdout, so an agent can
+ask the questions forge can answer — what changed inside a file whose format has
+a handler, which handler claims a path, what a commit changed — and complete the
+loop those answers are for: decide a semantic conflict, write the resolution,
+stage it, commit it.
+
+Writes are served by default. --read-only serves only the tools annotated
+read-only, and takes precedence over anything else in a client's configuration.
+Either way the source list — forge's trust boundary — is reported but never
+modified, nothing is pushed, pulled or fetched, and no tool amends, forces or
+resets the working tree.
+
+The repository is the one this command is run in, resolved once at startup;
+every path an agent passes is resolved against that root and refused if it
+points outside.
+
+stdout carries the protocol, so run it from a client rather than a terminal:
+
+  { "mcpServers": { "forge": { "command": "forge", "args": ["mcp"] } } }`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			readOnly, _ := cmd.Flags().GetBool("read-only")
+			return mcpserver.Run(cmd.Context(), readOnly)
+		},
+	}
+	cmd.Flags().Bool("read-only", false, "Serve only the tools that change nothing")
+	return cmd
+}
+
 // ── forge source ────────────────────────────────────────────────────────────────────────────────────
 
 func sourceCmd() *cobra.Command {
@@ -1893,7 +1889,7 @@ func formatsCmd() *cobra.Command {
 		Short: "Manage format handlers for this repository",
 		RunE:  runFormats,
 	}
-	cmd.AddCommand(formatsAddCmd(), formatsIgnoreCmd(), formatsRemoveCmd(), formatsUpdateCmd(), formatsListCmd())
+	cmd.AddCommand(formatsAddCmd(), formatsIgnoreCmd(), formatsRemoveCmd(), formatsInstallCmd(), formatsUpdateCmd(), formatsListCmd())
 	return cmd
 }
 
@@ -1913,8 +1909,8 @@ func runFormatsIgnore(_ *cobra.Command, args []string) error {
 	}
 	ext = strings.ToLower(ext)
 
-	repoDir := findRepoRoot()
-	if err := ignoreInForgeFormats(repoDir, ext); err != nil {
+	repoDir := forgerepo.FindRoot()
+	if err := forgerepo.IgnoreInForgeFormats(repoDir, ext); err != nil {
 		return fmt.Errorf("updating .forge/formats: %w", err)
 	}
 	fmt.Printf("Ignoring %s (tracked, no handler). Undo with: forge formats add %s\n", ext, ext)
@@ -1922,9 +1918,9 @@ func runFormatsIgnore(_ *cobra.Command, args []string) error {
 }
 
 func runFormats(_ *cobra.Command, _ []string) error {
-	repoDir := findRepoRoot()
-	forgeFormats := loadForgeFormats(repoDir)
-	ignored := loadIgnoredFormats(repoDir)
+	repoDir := forgerepo.FindRoot()
+	forgeFormats := forgerepo.LoadForgeFormats(repoDir)
+	ignored := forgerepo.LoadIgnoredFormats(repoDir)
 	if len(forgeFormats) == 0 && len(ignored) == 0 {
 		fmt.Println("No formats configured for this repository.")
 		fmt.Println("Add one with: forge formats add <extension>")
@@ -1984,7 +1980,7 @@ func formatsAddCmd() *cobra.Command {
 func runFormatsAdd(cmd *cobra.Command, args []string) error {
 	sourceName, _ := cmd.Flags().GetString("source")
 	all, _ := cmd.Flags().GetBool("all")
-	repoDir := findRepoRoot()
+	repoDir := forgerepo.FindRoot()
 
 	sources, err := fhr.LoadSources()
 	if err != nil {
@@ -2015,7 +2011,7 @@ func runFormatsAdd(cmd *cobra.Command, args []string) error {
 	}
 	ext = strings.ToLower(ext)
 
-	if err := addToForgeFormats(repoDir, ext); err != nil {
+	if err := forgerepo.AddToForgeFormats(repoDir, ext); err != nil {
 		return fmt.Errorf("updating .forge/formats: %w", err)
 	}
 	if len(sources) == 0 {
@@ -2058,10 +2054,10 @@ func resolveAndInstall(repoDir string, sources []fhr.Source, ext string) (bool, 
 				fmt.Fprintf(os.Stderr, "forge: warning: could not update .gitattributes: %v\n", err)
 			}
 			installedBuild := fhr.InstalledHandlerBuild(handlerID)
-			handlers := loadForgeHandlers(repoDir)
+			handlers := forgerepo.LoadForgeHandlers(repoDir)
 			if _, pinned := handlers[handlerID]; !pinned && installedBuild != "" {
 				handlers[handlerID] = &installedBuild
-				if err := saveForgeHandlers(repoDir, handlers); err != nil {
+				if err := forgerepo.SaveForgeHandlers(repoDir, handlers); err != nil {
 					fmt.Fprintf(os.Stderr, "forge: warning: could not update .forge/handlers: %v\n", err)
 				}
 			}
@@ -2082,10 +2078,10 @@ func resolveAndInstall(repoDir string, sources []fhr.Source, ext string) (bool, 
 		if err := setupGitMergeDriver(repoDir); err != nil {
 			fmt.Fprintf(os.Stderr, "forge: warning: could not update .gitattributes: %v\n", err)
 		}
-		handlers := loadForgeHandlers(repoDir)
+		handlers := forgerepo.LoadForgeHandlers(repoDir)
 		b := build
 		handlers[handlerID] = &b
-		if err := saveForgeHandlers(repoDir, handlers); err != nil {
+		if err := forgerepo.SaveForgeHandlers(repoDir, handlers); err != nil {
 			fmt.Fprintf(os.Stderr, "forge: warning: could not update .forge/handlers: %v\n", err)
 		}
 		return true, nil
@@ -2101,8 +2097,8 @@ func runFormatsAddBulk(repoDir string, sources []fhr.Source, all bool) error {
 	if err != nil {
 		return err
 	}
-	included := loadForgeFormats(repoDir)
-	ignored := loadIgnoredFormats(repoDir)
+	included := forgerepo.LoadForgeFormats(repoDir)
+	ignored := forgerepo.LoadIgnoredFormats(repoDir)
 
 	var candidates []string
 	for _, ext := range discovered {
@@ -2127,7 +2123,7 @@ func runFormatsAddBulk(repoDir string, sources []fhr.Source, all bool) error {
 			return err
 		}
 		if resolved || all {
-			if err := addToForgeFormats(repoDir, ext); err != nil {
+			if err := forgerepo.AddToForgeFormats(repoDir, ext); err != nil {
 				return err
 			}
 			added = append(added, ext)
@@ -2177,20 +2173,6 @@ func discoverRepoExtensions(repoDir string) ([]string, error) {
 	return exts, nil
 }
 
-// addToForgeFormats marks ext as included, flipping it out of the ignore list
-// if it was previously ignored.
-func addToForgeFormats(repoDir, ext string) error {
-	_, err := setForgeFormat(repoDir, ext, "")
-	return err
-}
-
-// ignoreInForgeFormats marks ext as ignored (tracked by git, no handler),
-// flipping it out of the included list if it was previously added.
-func ignoreInForgeFormats(repoDir, ext string) error {
-	_, err := setForgeFormat(repoDir, ext, "!")
-	return err
-}
-
 func formatsRemoveCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "remove <extension>",
@@ -2207,8 +2189,8 @@ func runFormatsRemove(_ *cobra.Command, args []string) error {
 	}
 	ext = strings.ToLower(ext)
 
-	repoDir := findRepoRoot()
-	if err := removeFromForgeFormats(repoDir, ext); err != nil {
+	repoDir := forgerepo.FindRoot()
+	if err := forgerepo.RemoveFromForgeFormats(repoDir, ext); err != nil {
 		return err
 	}
 	if err := removeFromGitAttributes(repoDir, ext); err != nil {
@@ -2216,36 +2198,6 @@ func runFormatsRemove(_ *cobra.Command, args []string) error {
 	}
 	fmt.Printf("Removed %s from .forge/formats\n", ext)
 	return nil
-}
-
-func removeFromForgeFormats(repoDir, ext string) error {
-	path, err := migratePerRepoFile(repoDir, "formats", ".forge-formats")
-	if err != nil {
-		return err
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf(".forge/formats not found")
-	}
-	var out []string
-	found := false
-	for _, line := range strings.Split(string(data), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			out = append(out, line)
-			continue
-		}
-		// Match either an included (".ext") or ignored ("!.ext") entry.
-		if e, _ := parseFormatLine(trimmed); e == ext {
-			found = true
-			continue
-		}
-		out = append(out, line)
-	}
-	if !found {
-		return fmt.Errorf("%s is not in .forge/formats", ext)
-	}
-	return os.WriteFile(path, []byte(strings.Join(out, "\n")), 0644)
 }
 
 func removeFromGitAttributes(repoDir, ext string) error {
@@ -2269,14 +2221,34 @@ func formatsUpdateCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "update [extension]",
 		Short: "Update installed handler(s) if a newer build is available",
-		Args:  cobra.MaximumNArgs(1),
-		RunE:  runFormatsUpdate,
+		Long: "Updates the handlers for this repo's listed formats to the current build,\n" +
+			"installing any that are missing. `forge formats install` is the same\n" +
+			"operation under its reconcile-focused name.",
+		Args: cobra.MaximumNArgs(1),
+		RunE: runFormatsUpdate,
+	}
+}
+
+// formatsInstallCmd is the discoverable name for the reconcile operation that
+// `formats update` already performs (issue #34): install a handler for every
+// format this repo lists that isn't installed yet — exactly what a fresh clone
+// of a repo with a committed .forge/formats needs.
+func formatsInstallCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "install [extension]",
+		Short: "Install handlers for every listed format that is missing",
+		Long: "Installs a handler for every format listed in .forge/formats that has no\n" +
+			"installed handler yet (and refreshes outdated ones). Run it after cloning a\n" +
+			"repo with a committed .forge/formats, or whenever `forge status` reports\n" +
+			"formats with no handler. Alias of `forge formats update`.",
+		Args: cobra.MaximumNArgs(1),
+		RunE: runFormatsUpdate,
 	}
 }
 
 func runFormatsUpdate(_ *cobra.Command, args []string) error {
-	repoDir := findRepoRoot()
-	forgeFormats := loadForgeFormats(repoDir)
+	repoDir := forgerepo.FindRoot()
+	forgeFormats := forgerepo.LoadForgeFormats(repoDir)
 
 	var targetExts []string
 	if len(args) == 1 {
@@ -2305,7 +2277,7 @@ func runFormatsUpdate(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("no sources configured — run: forge source add <url>")
 	}
 
-	lockfile := loadForgeHandlers(repoDir)
+	lockfile := forgerepo.LoadForgeHandlers(repoDir)
 	dirty := false
 
 	for _, ext := range targetExts {
@@ -2349,7 +2321,7 @@ func runFormatsUpdate(_ *cobra.Command, args []string) error {
 	}
 
 	if dirty {
-		if err := saveForgeHandlers(repoDir, lockfile); err != nil {
+		if err := forgerepo.SaveForgeHandlers(repoDir, lockfile); err != nil {
 			fmt.Fprintf(os.Stderr, "forge: warning: could not save .forge/handlers: %v\n", err)
 		}
 	}

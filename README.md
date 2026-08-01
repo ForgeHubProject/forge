@@ -180,6 +180,36 @@ forge diff character.blend  (no BlenderHandler installed)
 
 ---
 
+## History — `forge diff <revision>` and `forge show`
+
+Committing does not put a change out of reach: git keeps both versions of every
+file, so a handler can be handed any two of them.
+
+```
+forge diff                        the working tree against HEAD
+forge diff <revision>             the working tree against a revision
+forge diff <base> <head>          revision to revision
+forge show <revision>             what one commit changed, against its first parent
+```
+
+Revisions are whatever git resolves — object id, branch, tag, `HEAD~2`,
+`<base>..<head>`. Paths may follow them, and `--` separates the two when an
+argument is both a revision and a filename, exactly as in git. Paths a handler
+claims get the semantic diff; the rest fall through to git's text diff, so the
+commands are useful on mixed commits and not only on handled files.
+
+```
+forge show HEAD
+  → resolve the commit, list what it changed against its first parent
+  → for each path: handler.Diff(blob at parent, blob at commit) → StructuredDiff
+  → paths with no handler are summarised with git's own line counts
+```
+
+A file one side does not have arrives at the handler as an empty blob, which is
+what "wholly added" and "wholly removed" mean. `--web` takes the same revisions.
+
+---
+
 ## Local web diff — `forge diff --web`
 
 The terminal is fine for a change tree, but some formats read better in a
@@ -203,6 +233,73 @@ diff on ForgeHub: the same renderer bundle mounts the same `StructuredDiff`,
 just computed by your `forge` instead of the server. `--no-open` prints the URL
 without launching a browser. Renderer bundles are installed alongside handlers
 by `forge formats add`.
+
+The page takes revisions too — `forge diff --web <base> <head> <file>` renders a
+historical change — and its header names which two versions are on screen, so a
+rendered page never leaves you guessing whether you are looking at uncommitted
+work or at a commit.
+
+---
+
+## Agents — `forge mcp`
+
+An agent reviewing a repository full of structured files is blind exactly where a
+person is: `git diff` answers "binary files differ" and the conversation ends.
+`forge mcp` runs a Model Context Protocol server over stdio, so the semantic
+layer is reachable by a client and not only by a terminal:
+
+```json
+{ "mcpServers": { "forge": { "command": "forge", "args": ["mcp"] } } }
+```
+
+Ten read-only tools — the surface `forge mcp --read-only` serves in full:
+`forge_status`, `forge_semantic_diff`, `forge_show`, `forge_handler_for`,
+`forge_formats`, `forge_source_list`, `forge_conflicts`, and three that answer
+what the others assume you already know. `forge_log` walks history and marks, per
+commit, which of its paths a handler claims here, so an agent sees at a glance
+which commits it can ask a semantic question about. `forge_branches` lists local
+branches with their tip and subject and the one checked out marked, and takes
+tags and remote-tracking refs on request — a local read of what the last fetch
+left, since nothing here reaches the network for a ref. `forge_merge_preview`
+says whether two revisions would merge and where they would not, running each
+claimed path's merge in memory and leaving the rest to git, without touching the
+index, the working tree, or anything else in the repository. The revision
+semantics are `forge diff`'s, computed by the same function, so an agent and a
+terminal get the same answer for the same arguments. Every semantic payload
+carries the handler id and the build that produced it.
+
+Responses are paginated on purpose. A change tree can be enormous, so a call
+returns a summary plus a capped, depth-first slice of the tree and
+`truncated{returned, total, hint}`. The hint names the cursors that reach what was
+withheld — `at` for a subtree the cap cut off, `after` for the rest of every level
+the cap cut short, deepest first — and both take a path from the response being
+read, so no capped response is a dead end and no answer needs the whole tree
+fetched to be complete. A cursor that would return the response naming it is not
+named: a hint is a next move, not a description. `kinds` narrows to the changes
+being looked for. `max_changes` is the whole response's cap and not each file's,
+so a commit's file list cannot multiply it. A response that does not say it was
+truncated was not — silent truncation would let an agent conclude a change set was
+complete when it was not.
+
+What forge can answer here is reported the way the answer is computed. A
+repository that opts no format in has not opted out of everything: an empty opt-in
+list filters nothing, so every installed handler answers, and `forge_formats` and
+`forge_handler_for` say so rather than promising a text fallback that will not
+happen. An extension the repository lists as ignored is the other way round — an
+ignore is a decision, so it holds whether or not anything else is opted in. A call
+is bounded, too — a client's cancellation and the server's own deadline both reach
+the handler subprocess, so a runaway handler is killed with the call it was
+spawned for.
+
+The repository is the one the command was started in, resolved once; every path
+an agent passes is resolved against that root and refused if it escapes — by its
+own name, and through any directory link on the way to it, because a repository
+under review is not allowed to steer a read out of itself. A link is compared as
+the path it names, which is what git recorded for it. The server never changes
+directory, never writes, and never touches the source list: adding a source is a
+human action at a terminal by design, because an agent that could perform that
+consenting act could be talked into it by the very repository content it is
+reviewing (issue #47).
 
 ---
 

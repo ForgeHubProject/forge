@@ -19,10 +19,12 @@ type Payload struct {
 	FilePath   string // repo-relative path being diffed, for display
 	HandlerID  string // e.g. "gltf-scene", shown in the header
 	Mode       string // "diff" (default) or "merge"
+	Compare    string // which two versions these blobs are, for the header (may be "")
 	DiffJSON   []byte // marshaled StructuredDiff
 	RendererJS string // path to the installed renderer bundle
-	Base       []byte // HEAD blob (may be nil)
-	Head       []byte // working-tree blob (may be nil)
+	Renderer3D string // path to the renderer's optional lazy 3D chunk (may be "")
+	Base       []byte // the base side's blob (may be nil)
+	Head       []byte // the head side's blob (may be nil)
 }
 
 // Serve starts the loopback server, prints the URL, tries to open a browser,
@@ -36,7 +38,11 @@ func Serve(p Payload, openBrowser bool) error {
 
 	srv := &http.Server{Handler: withCSP(p.handler())}
 
-	fmt.Printf("forge diff for %s — computed locally, served at:\n\n    %s\n\n", p.FilePath, url)
+	subject := p.FilePath
+	if p.Compare != "" {
+		subject += " (" + p.Compare + ")"
+	}
+	fmt.Printf("forge diff for %s — computed locally, served at:\n\n    %s\n\n", subject, url)
 	fmt.Println("Press Ctrl-C to stop.")
 	if openBrowser {
 		tryOpen(url)
@@ -57,18 +63,28 @@ func (p Payload) handler() http.Handler {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(w, indexHTML, htmlEscape(p.FilePath), htmlEscape(p.HandlerID))
+		fmt.Fprintf(w, indexHTML, htmlEscape(p.FilePath), htmlEscape(p.metaLine()))
 	})
 
 	mux.HandleFunc("/app.js", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-		fmt.Fprintf(w, appJS, jsString(mode))
+		fmt.Fprintf(w, appJS, jsString(mode), p.blobsJSON())
 	})
 
 	mux.HandleFunc("/renderer.js", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 		http.ServeFile(w, r, p.RendererJS)
 	})
+
+	// The lite bundle lazy-imports its 3D chunk as a sibling, e.g.
+	// /renderer-gltf-scene-3d.js. Serve it when the handler ships one; without
+	// it, "View in 3D" degrades gracefully in the bundle.
+	if p.Renderer3D != "" {
+		mux.HandleFunc("/renderer-"+p.HandlerID+"-3d.js", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+			http.ServeFile(w, r, p.Renderer3D)
+		})
+	}
 
 	mux.HandleFunc("/diff.json", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -95,9 +111,18 @@ func serveBlob(b []byte) http.HandlerFunc {
 // withCSP blocks any external fetch from the served page: scripts and styles
 // come only from this origin (styles allow inline because renderer bundles
 // inject a <style> element), and no other resource type is permitted.
+//
+// blob: and data: are permitted for images and connect because they are
+// same-document byte sources, not network egress. A renderer receives its
+// file's bytes and may need to hand a decoded region of them to the browser as
+// an image; the standard way is a blob:/data: URL, fetched back by the page
+// itself. Denying those schemes doesn't stop a renderer from reaching the
+// network (nothing here can) — it only makes embedded imagery silently fail to
+// appear. This is a capability of the renderer contract, not an accommodation
+// for any one format. Nothing about it permits bytes leaving the machine.
 func withCSP(next http.Handler) http.Handler {
 	const csp = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
-		"img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'"
+		"img-src 'self' data: blob:; connect-src 'self' data: blob:; base-uri 'none'; form-action 'none'"
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy", csp)
 		w.Header().Set("X-Content-Type-Options", "nosniff")

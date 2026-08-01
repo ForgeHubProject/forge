@@ -31,8 +31,10 @@ This document specifies the `.forge-formats` file, the `forge source` and
 >
 > Shortcuts: `forge formats add` with no argument scans tracked files and adds
 > every extension a source can handle (`--all` to add all discovered);
-> `forge formats update` (re)installs handlers for extensions already listed but
-> not yet installed — the "reconcile after clone" step.
+> **`forge formats install`** installs a handler for every listed format that is
+> missing — the "reconcile after clone" step (`forge formats update` is the same
+> operation, named for its refresh-outdated side). `forge status` flags any
+> listed format with no installed handler and points at `forge formats install`.
 
 `.forge-formats` complements the existing `.forge/handlers` domain manifest.
 Where `.forge/handlers` declares which **handler domains** a repo depends on

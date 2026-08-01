@@ -5,7 +5,7 @@ import (
 	"html"
 )
 
-// indexHTML is the shell page. Two %s: the file path and the handler id.
+// indexHTML is the shell page. Two %s: the file path and the meta line.
 // It loads the renderer as an ES module via /app.js; no inline script runs,
 // so the CSP can forbid inline scripts.
 const indexHTML = `<!doctype html>
@@ -31,7 +31,7 @@ const indexHTML = `<!doctype html>
 <body>
 <header>
   <span class="path">%s</span>
-  <span class="meta">handler: %s · computed locally by forge</span>
+  <span class="meta">%s</span>
 </header>
 <main><div id="root"></div></main>
 <script type="module" src="/app.js"></script>
@@ -39,7 +39,7 @@ const indexHTML = `<!doctype html>
 </html>`
 
 // appJS mounts the renderer bundle against the locally-computed diff.
-// One %s: the mode, as a JSON-quoted string.
+// Two %s: the mode as a JSON-quoted string, then the blobs object.
 const appJS = `import bundle from "/renderer.js";
 
 const root = document.getElementById("root");
@@ -51,16 +51,62 @@ try {
     mode: %s,
     diff,
     theme,
-    blobs: {
-      base: { url: "/blob/base", size: 0 },
-      head: { url: "/blob/head", size: 0 },
-    },
+    blobs: %s,
     onEvent: () => {},
   });
 } catch (err) {
   root.textContent = "Failed to render diff: " + (err && err.message ? err.message : String(err));
 }
 `
+
+// blobRef is one byte source offered to the renderer: where to fetch it, and
+// how many bytes it is.
+type blobRef struct {
+	URL  string `json:"url"`
+	Size int    `json:"size"`
+}
+
+// blobsJSON describes the two byte sources the page serves.
+//
+// The size is not decoration. A renderer that wants to hold both versions in
+// memory at once has to decide whether it can afford to *before* fetching, and
+// the only number it has to decide with is this one. Reporting a placeholder
+// leaves the renderer choosing against a value that says nothing, and a
+// renderer that reads a non-positive size as "there is nothing worth fetching
+// here" will quietly skip a side that forge is in fact serving — a whole
+// version missing from the view, with nothing on screen to say why. So this
+// reports the real length of the bytes actually held.
+//
+// A side with no bytes at all — a file added or deleted by this change — is
+// reported as null rather than as a zero-length blob, so "there is no previous
+// version" stays distinguishable from "there is one, and it is empty".
+func (p Payload) blobsJSON() string {
+	blobs := map[string]*blobRef{"base": nil, "head": nil}
+	if p.Base != nil {
+		blobs["base"] = &blobRef{URL: "/blob/base", Size: len(p.Base)}
+	}
+	if p.Head != nil {
+		blobs["head"] = &blobRef{URL: "/blob/head", Size: len(p.Head)}
+	}
+	b, err := json.Marshal(blobs)
+	if err != nil {
+		return `{"base":null,"head":null}`
+	}
+	return string(b)
+}
+
+// metaLine states what the page is showing: which handler produced the diff,
+// and — when the caller compares anything other than the obvious — which two
+// versions the blobs come from. The page can be pointed at any pair of
+// revisions, so leaving the header to imply "working tree" would misreport what
+// the reader is looking at.
+func (p Payload) metaLine() string {
+	meta := "handler: " + p.HandlerID
+	if p.Compare != "" {
+		meta += " · comparing " + p.Compare
+	}
+	return meta + " · computed locally by forge"
+}
 
 func htmlEscape(s string) string { return html.EscapeString(s) }
 
