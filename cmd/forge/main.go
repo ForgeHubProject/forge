@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/forgehubproject/forge/internal/credential"
 	"github.com/forgehubproject/forge/internal/fhr"
@@ -658,7 +659,9 @@ func runLogin(cmd *cobra.Command, args []string) error {
 		if info.SSHFingerprint != "" {
 			fmt.Printf("Host key fingerprint: %s\n", info.SSHFingerprint)
 		}
-		fmt.Printf("To trust this server's host key, run:\n")
+		fmt.Printf("To trust this server's host key, first check the key it presents against the fingerprint above:\n")
+		fmt.Printf("  ssh-keyscan -p %d %s | ssh-keygen -lf -\n", port, host)
+		fmt.Printf("If it matches, append it:\n")
 		fmt.Printf("  ssh-keyscan -p %d %s >> ~/.ssh/known_hosts\n", port, host)
 	}
 
@@ -673,7 +676,8 @@ type serverInfo struct {
 }
 
 func fetchServerInfo(baseURL string) (*serverInfo, error) {
-	resp, err := http.Get(baseURL + "/server/info")
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(baseURL + "/server/info")
 	if err != nil {
 		return nil, err
 	}
