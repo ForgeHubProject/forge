@@ -1618,38 +1618,56 @@ Exits 0 on a clean merge, 1 if there are conflicts.`,
 }
 
 func runMergeFile(_ *cobra.Command, args []string) error {
+	conflicted, err := mergeFile(defaultRegistry(), args)
+	if err != nil {
+		return err
+	}
+	if conflicted {
+		os.Exit(1)
+	}
+	return nil
+}
+
+// mergeFile is merge-file's work, apart from the exit status: it reports
+// whether conflicts were left in OURS.
+func mergeFile(reg *handler.Registry, args []string) (conflicted bool, err error) {
 	basePath, oursPath, theirsPath := cleanPath(args[0]), cleanPath(args[1]), cleanPath(args[2])
-	sidecarBase := oursPath
+	// As a git merge driver this runs on temporary files — git names them
+	// .merge_file_XXXXXX, with no extension — and passes the file's real path
+	// as the fourth argument (%P). Handlers are chosen by that name, so the
+	// real path is the one to resolve: resolving the temp name matched no
+	// format handler, fell through to plain text, and line-merged every file,
+	// writing conflict markers into binary ones.
+	realPath := oursPath
 	if len(args) == 4 {
-		sidecarBase = cleanPath(args[3])
+		realPath = cleanPath(args[3])
 	}
 
 	base, err := os.ReadFile(basePath)
 	if err != nil {
-		return fmt.Errorf("reading base %s: %w", basePath, err)
+		return false, fmt.Errorf("reading base %s: %w", basePath, err)
 	}
 	ours, err := os.ReadFile(oursPath)
 	if err != nil {
-		return fmt.Errorf("reading ours %s: %w", oursPath, err)
+		return false, fmt.Errorf("reading ours %s: %w", oursPath, err)
 	}
 	theirs, err := os.ReadFile(theirsPath)
 	if err != nil {
-		return fmt.Errorf("reading theirs %s: %w", theirsPath, err)
+		return false, fmt.Errorf("reading theirs %s: %w", theirsPath, err)
 	}
 
-	reg := defaultRegistry()
-	h, err := reg.Resolve(oursPath)
+	h, err := reg.Resolve(realPath)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	merged, ci, err := h.Merge(base, ours, theirs)
 	if err != nil {
-		return fmt.Errorf("merge failed: %w", err)
+		return false, fmt.Errorf("merge failed: %w", err)
 	}
 
 	if err := os.WriteFile(oursPath, merged, 0644); err != nil {
-		return fmt.Errorf("writing result to %s: %w", oursPath, err)
+		return false, fmt.Errorf("writing result to %s: %w", oursPath, err)
 	}
 
 	if ci != nil && len(ci.Conflicts) > 0 {
@@ -1663,18 +1681,18 @@ func runMergeFile(_ *cobra.Command, args []string) error {
 			TheirsB64: base64.StdEncoding.EncodeToString(theirs),
 		}
 		if data, err := json.MarshalIndent(sidecar, "", "  "); err == nil {
-			_ = os.WriteFile(sidecarBase+".forge-conflict", data, 0644)
+			_ = os.WriteFile(realPath+".forge-conflict", data, 0644)
 		}
 
-		fmt.Fprintf(os.Stderr, "CONFLICT: %d conflict(s) in %s\n", len(ci.Conflicts), oursPath)
+		fmt.Fprintf(os.Stderr, "CONFLICT: %d conflict(s) in %s\n", len(ci.Conflicts), realPath)
 		for _, c := range ci.Conflicts {
 			fmt.Fprintf(os.Stderr, "  %s\n", c.Path)
 		}
-		os.Exit(1)
+		return true, nil
 	}
 
-	fmt.Printf("Merged cleanly into %s\n", oursPath)
-	return nil
+	fmt.Printf("Merged cleanly into %s\n", realPath)
+	return false, nil
 }
 
 // ── forge mcp ───────────────────────────────────────────────────────────────────────────────────────
