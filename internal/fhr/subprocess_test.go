@@ -6,23 +6,24 @@ import (
 	"github.com/forgehubproject/forge/internal/handler"
 )
 
-// A handler binary speaks the subprocess protocol and nothing else: match, diff,
-// merge, and the optional info. handler.ConflictApplier has no call there, so
-// nothing here may claim it. A method that shelled out to a subcommand the
-// protocol does not define would be forge inventing one on every handler
-// author's behalf, and every handler that exists would answer it the same way —
-// unknown subcommand, exit 1 — after the caller had already been told the
-// capability was available.
+// A handler binary speaks the subprocess protocol: match, diff, merge, and the
+// optional info — plus optional calls it declares, like apply-choices. So a
+// SubprocessHandler must not *be* a handler.ConflictApplier: a method that
+// shelled out to a subcommand the binary never promised would be answered
+// "unknown subcommand, exit 1" after the caller had been told the capability
+// was there. It offers one through ChoiceApplier, only when info declares it.
 //
-// Callers branch on exactly this assertion: forge mergetool offers the
-// interactive picker only to a handler that can apply choices, and takes the
-// manual route otherwise. A handler binary that started passing it would put
-// every user of one through a picker that cannot finish.
+// Callers branch on exactly this: forge mergetool offers the interactive
+// picker only to a handler that can apply choices, and takes the manual route
+// otherwise. A picker that cannot finish is worse than no picker.
 func TestASubprocessHandlerClaimsNoCallTheProtocolDoesNotHave(t *testing.T) {
 	var h any = &SubprocessHandler{}
 
 	if _, ok := h.(handler.ConflictApplier); ok {
-		t.Fatal("a handler binary cannot apply conflict choices: the subprocess protocol has no call for it")
+		t.Fatal("a handler binary must not claim apply-choices before its info declares it")
+	}
+	if _, ok := h.(handler.ChoiceApplierProvider); !ok {
+		t.Fatal("a handler binary must be asked whether it can apply choices")
 	}
 	if _, ok := h.(handler.ForgeHandler); !ok {
 		t.Fatal("a handler binary must still be a ForgeHandler")

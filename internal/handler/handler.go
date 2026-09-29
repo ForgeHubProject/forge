@@ -76,13 +76,21 @@ type ConflictSidecar struct {
 }
 
 // ConflictApplier is an optional interface handlers may implement to support
-// interactive conflict resolution in forge mergetool.
+// interactive conflict resolution in forge mergetool: for each conflict path in
+// takePaths, take theirs instead of the ours the merge kept.
 //
-// No handler forge loads from a binary implements it, and none can: the
-// subprocess protocol has calls for match, diff and merge, and none that decides
-// one conflict at a time. It is an in-process interface, which is why every
-// caller has a route that works without it — a conflict decided the same way
-// throughout a file is the merge itself, run from one side or the other.
+// A handler loaded from a binary offers it only when the binary declares
+// `capabilities.applyChoices` and so answers the protocol's `apply-choices`
+// call (FHR SPEC §7) — see ChoiceApplierProvider. Every caller keeps a route
+// that works without it: the conflicts are listed for resolving by hand.
 type ConflictApplier interface {
 	ApplyChoices(merged, theirs Blob, takePaths []string) (Blob, error)
+}
+
+// ChoiceApplierProvider is implemented by handlers that can apply choices only
+// sometimes — a subprocess handler whose binary may or may not declare it. The
+// answer is asked for when needed, not at load: finding out costs the binary's
+// `info` call, and only a conflicted merge ever needs it.
+type ChoiceApplierProvider interface {
+	ChoiceApplier() (ConflictApplier, bool)
 }

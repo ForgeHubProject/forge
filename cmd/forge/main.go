@@ -1289,6 +1289,12 @@ func resolveInteractive(path string, h handler.ForgeHandler) bool {
 
 	applier, canApply := h.(handler.ConflictApplier)
 	if !canApply {
+		// A handler loaded from a binary can apply choices only if it says so.
+		if p, ok := h.(handler.ChoiceApplierProvider); ok {
+			applier, canApply = p.ChoiceApplier()
+		}
+	}
+	if !canApply {
 		return promptManualResolve(path, sc.Conflicts)
 	}
 

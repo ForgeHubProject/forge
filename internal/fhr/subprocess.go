@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/forgehubproject/forge/internal/handler"
@@ -17,11 +18,12 @@ import (
 // SubprocessHandler wraps an FHR handler binary as a ForgeHandler.
 // Match is fast (extension check from metadata); Diff/Merge spawn the subprocess.
 //
-// Those are the calls, and there are no others: a method here that spawned a
-// subcommand the protocol does not define would be forge inventing one on every
-// handler author's behalf, and every handler that exists would answer it with
-// "unknown subcommand". handler.ConflictApplier is the interface that invites
-// exactly that, which is why nothing here implements it.
+// Those are the calls it always makes. A call the protocol makes optional —
+// `apply-choices` — is made only when the binary declares it in `info`: a
+// method that spawned a subcommand the handler never promised would be forge
+// inventing a call on every handler author's behalf, answered everywhere with
+// "unknown subcommand". So SubprocessHandler does not implement
+// handler.ConflictApplier itself; ChoiceApplier asks the binary first.
 //
 // ctx is held rather than taken per call because ForgeHandler's methods take
 // none: it bounds the subprocesses this handler spawns, so a caller that builds
@@ -32,6 +34,9 @@ type SubprocessHandler struct {
 	id         string
 	formats    []string
 	ctx        context.Context
+
+	applyOnce sync.Once
+	canApply  bool
 }
 
 // NewSubprocessHandler builds a SubprocessHandler from a binary path and
@@ -116,6 +121,56 @@ func (h *SubprocessHandler) Merge(base, ours, theirs handler.Blob) (handler.Blob
 	return merged, ci, nil
 }
 
+// ChoiceApplier implements handler.ChoiceApplierProvider: a ConflictApplier
+// when the binary declares `capabilities.applyChoices`, asked once per handler
+// through `info`. A binary that answers nothing, or declares nothing, cannot
+// apply choices — which is the honest answer for every handler that predates
+// the call.
+func (h *SubprocessHandler) ChoiceApplier() (handler.ConflictApplier, bool) {
+	h.applyOnce.Do(func() {
+		info, err := HandlerInfo(h.ctx, h.binaryPath)
+		h.canApply = err == nil && info.Capabilities != nil &&
+			info.Capabilities.ApplyChoices != nil && *info.Capabilities.ApplyChoices
+	})
+	if !h.canApply {
+		return nil, false
+	}
+	return subprocessApplier{h}, true
+}
+
+// subprocessApplier makes the protocol's `apply-choices` call.
+type subprocessApplier struct{ h *SubprocessHandler }
+
+func (a subprocessApplier) ApplyChoices(merged, theirs handler.Blob, takePaths []string) (handler.Blob, error) {
+	if takePaths == nil {
+		takePaths = []string{}
+	}
+	inp, _ := json.Marshal(struct {
+		Merged string   `json:"merged"`
+		Theirs string   `json:"theirs"`
+		Take   []string `json:"take"`
+	}{
+		Merged: base64.StdEncoding.EncodeToString(merged),
+		Theirs: base64.StdEncoding.EncodeToString(theirs),
+		Take:   takePaths,
+	})
+	out, err := runSubprocess(a.h.ctx, a.h.binaryPath, "apply-choices", inp)
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Blob string `json:"blob"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("parsing apply-choices output from %s: %w", a.h.id, err)
+	}
+	blob, err := base64.StdEncoding.DecodeString(result.Blob)
+	if err != nil {
+		return nil, fmt.Errorf("decoding apply-choices blob from %s: %w", a.h.id, err)
+	}
+	return blob, nil
+}
+
 // Info is what a handler binary answers for the protocol's "info" call: the id
 // it goes by, its own version, the extensions it claims, and the protocol
 // revision it speaks. Capabilities is the handler's own declaration — a handler
@@ -135,6 +190,8 @@ type Info struct {
 type InfoCapabilities struct {
 	SemanticCompare *bool `json:"semanticCompare,omitempty"`
 	SemanticMerge   *bool `json:"semanticMerge,omitempty"`
+	// ApplyChoices says the binary answers `apply-choices` (FHR SPEC §7).
+	ApplyChoices *bool `json:"applyChoices,omitempty"`
 }
 
 // HandlerInfo asks an installed handler binary to describe itself. The call is
