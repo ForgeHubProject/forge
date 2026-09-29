@@ -25,6 +25,12 @@ type Payload struct {
 	Renderer3D string // path to the renderer's optional lazy 3D chunk (may be "")
 	Base       []byte // the base side's blob (may be nil)
 	Head       []byte // the head side's blob (may be nil)
+
+	// The handler's previews of the same sides (FHR SPEC §7), for a format the
+	// browser cannot draw from its own bytes — OBJ's GLB. Either may be nil;
+	// PreviewType is their media type, "" when there are none.
+	PreviewType              string
+	PreviewBase, PreviewHead []byte
 }
 
 // Serve starts the loopback server, prints the URL, tries to open a browser,
@@ -68,7 +74,7 @@ func (p Payload) handler() http.Handler {
 
 	mux.HandleFunc("/app.js", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-		fmt.Fprintf(w, appJS, jsString(mode), p.blobsJSON())
+		fmt.Fprintf(w, appJS, jsString(mode), p.blobsJSON(), p.previewsJS())
 	})
 
 	mux.HandleFunc("/renderer.js", func(w http.ResponseWriter, r *http.Request) {
@@ -93,17 +99,25 @@ func (p Payload) handler() http.Handler {
 
 	mux.HandleFunc("/blob/base", serveBlob(p.Base))
 	mux.HandleFunc("/blob/head", serveBlob(p.Head))
+	if p.PreviewType != "" {
+		mux.HandleFunc("/preview/base", serveTyped(p.PreviewBase, p.PreviewType))
+		mux.HandleFunc("/preview/head", serveTyped(p.PreviewHead, p.PreviewType))
+	}
 
 	return mux
 }
 
 func serveBlob(b []byte) http.HandlerFunc {
+	return serveTyped(b, "application/octet-stream")
+}
+
+func serveTyped(b []byte, contentType string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if b == nil {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Type", contentType)
 		_, _ = w.Write(b)
 	}
 }

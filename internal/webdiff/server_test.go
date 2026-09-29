@@ -212,3 +212,68 @@ func TestNo3DChunkRouteWhenAbsent(t *testing.T) {
 		t.Fatalf("expected 404 with no 3D chunk, got %d", resp.StatusCode)
 	}
 }
+
+func withPreviews(p Payload) Payload {
+	p.FilePath = "models/desk.obj"
+	p.HandlerID = "obj"
+	p.PreviewType = "model/gltf-binary"
+	p.PreviewBase = []byte("glTF-base")
+	p.PreviewHead = []byte("glTF-head-longer")
+	return p
+}
+
+// The handler's previews are served next to the blobs, typed as what the
+// handler said they are, and the page's mount names their real sizes.
+func TestServesPreviewsWhenPresent(t *testing.T) {
+	p := withPreviews(newTestPayload(t))
+	h := withCSP(p.handler())
+	for path, want := range map[string]string{"/preview/base": "glTF-base", "/preview/head": "glTF-head-longer"} {
+		resp := doGet(t, h, path)
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != 200 || string(body) != want {
+			t.Errorf("%s: %d %q, want 200 %q", path, resp.StatusCode, body, want)
+		}
+		if ct := resp.Header.Get("Content-Type"); ct != "model/gltf-binary" {
+			t.Errorf("%s: Content-Type = %q", path, ct)
+		}
+	}
+	body, _ := io.ReadAll(doGet(t, h, "/app.js").Body)
+	want := `previews: {"base":{"url":"/preview/base","size":9},"head":{"url":"/preview/head","size":16}}`
+	if !strings.Contains(string(body), want) {
+		t.Errorf("app.js missing %s; got:\n%s", want, body)
+	}
+}
+
+// A side whose preview failed (or does not exist) is null, like a missing blob.
+func TestPreviewMissingSideIsNull(t *testing.T) {
+	p := withPreviews(newTestPayload(t))
+	p.PreviewBase = nil
+	h := withCSP(p.handler())
+	body, _ := io.ReadAll(doGet(t, h, "/app.js").Body)
+	if !strings.Contains(string(body), `previews: {"base":null,"head":{"url":"/preview/head","size":16}}`) {
+		t.Errorf("app.js should report the failed side as null; got:\n%s", body)
+	}
+	if resp := doGet(t, h, "/preview/base"); resp.StatusCode != 404 {
+		t.Errorf("/preview/base: %d, want 404", resp.StatusCode)
+	}
+}
+
+// Without previews the mount gets none — MountProps.previews is optional, and
+// a renderer drawing from them falls back to its change tree — and there is no
+// route to ask for one.
+func TestNoPreviewsWhenAbsent(t *testing.T) {
+	p := newTestPayload(t)
+	h := withCSP(p.handler())
+	body, _ := io.ReadAll(doGet(t, h, "/app.js").Body)
+	if !strings.Contains(string(body), "previews: undefined") {
+		t.Errorf("app.js should pass no previews; got:\n%s", body)
+	}
+	if resp := doGet(t, h, "/preview/head"); resp.StatusCode != 404 {
+		t.Errorf("/preview/head: %d, want 404", resp.StatusCode)
+	}
+	p.PreviewType = "model/gltf-binary" // declared, but both sides failed
+	body, _ = io.ReadAll(doGet(t, withCSP(p.handler()), "/app.js").Body)
+	if !strings.Contains(string(body), "previews: undefined") {
+		t.Errorf("app.js should pass no previews when none were made; got:\n%s", body)
+	}
+}
