@@ -1,3 +1,12 @@
+forge (1.0.1-1) noble; urgency=medium
+
+  * New upstream release 1.0.1: the git merge driver (forge merge-file) now
+    chooses the format handler by the file's real path, so git merge reaches
+    semantic handlers and no longer writes conflict markers into binary
+    files.
+
+ -- Yakup Atahanov <yakup.atahanow.b@gmail.com>  Tue, 29 Sep 2026 02:00:00 +0000
+
 forge (1.0.0-2) noble; urgency=medium
 
   * Set GOTOOLCHAIN=local to fix build in Launchpad sandbox (no network access).

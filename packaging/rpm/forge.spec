@@ -1,5 +1,5 @@
 Name:           forge
-Version:        1.0.0
+Version:        1.0.1
 Release:        1%{?dist}
 Summary:        Git-based version control CLI for 3D models and game assets
 
@@ -40,6 +40,10 @@ go test ./...
 %{_bindir}/forge
 
 %changelog
+* Tue Sep 29 2026 Yakup Atahanov <yakup.atahanow.b@gmail.com> - 1.0.1-1
+- New upstream release: the git merge driver chooses the format handler by
+  the file's real path, so git merge reaches semantic handlers
+
 * Mon Sep 08 2026 Toufic Majdalani <toufic@touficmajdalani.com> - 1.0.0-1
 - Initial release
 - Git-based CLI with semantic diff and merge for 3D models, game assets,
