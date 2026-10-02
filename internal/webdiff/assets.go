@@ -39,7 +39,8 @@ const indexHTML = `<!doctype html>
 </html>`
 
 // appJS mounts the renderer bundle against the locally-computed diff.
-// Two %s: the mode as a JSON-quoted string, then the blobs object.
+// Three %s: the mode as a JSON-quoted string, the blobs object, and the
+// previews object (or undefined).
 const appJS = `import bundle from "/renderer.js";
 
 const root = document.getElementById("root");
@@ -52,6 +53,7 @@ try {
     diff,
     theme,
     blobs: %s,
+    previews: %s,
     onEvent: () => {},
   });
 } catch (err) {
@@ -91,6 +93,28 @@ func (p Payload) blobsJSON() string {
 	b, err := json.Marshal(blobs)
 	if err != nil {
 		return `{"base":null,"head":null}`
+	}
+	return string(b)
+}
+
+// previewsJS describes the handler's previews the page serves, in the same
+// shape as blobsJSON, or `undefined` when the handler has none: MountProps
+// .previews is optional, and a renderer that draws from previews degrades to
+// its change tree without them (FHR SPEC §7).
+func (p Payload) previewsJS() string {
+	if p.PreviewType == "" || (p.PreviewBase == nil && p.PreviewHead == nil) {
+		return "undefined"
+	}
+	previews := map[string]*blobRef{"base": nil, "head": nil}
+	if p.PreviewBase != nil {
+		previews["base"] = &blobRef{URL: "/preview/base", Size: len(p.PreviewBase)}
+	}
+	if p.PreviewHead != nil {
+		previews["head"] = &blobRef{URL: "/preview/head", Size: len(p.PreviewHead)}
+	}
+	b, err := json.Marshal(previews)
+	if err != nil {
+		return "undefined"
 	}
 	return string(b)
 }

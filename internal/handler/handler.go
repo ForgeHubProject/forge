@@ -94,3 +94,18 @@ type ConflictApplier interface {
 type ChoiceApplierProvider interface {
 	ChoiceApplier() (ConflictApplier, bool)
 }
+
+// Previewer converts one blob into something a browser can draw — for a 3D
+// format, a GLB whose node names are the names its diff's paths use (FHR SPEC
+// §7 `preview`). forge diff --web hands it to the renderer as its previews.
+type Previewer interface {
+	PreviewMediaType() string
+	Preview(blob Blob) (Blob, error)
+}
+
+// PreviewerProvider is implemented by handlers that have a preview only
+// sometimes — a subprocess handler whose binary may or may not declare one.
+// Asked when needed, not at load.
+type PreviewerProvider interface {
+	Previewer() (Previewer, bool)
+}
