@@ -1000,7 +1000,7 @@ func diffFileWeb(repoDir string, reg *handler.Registry, path string, base, head 
 		return err
 	}
 
-	return webdiff.Serve(webdiff.Payload{
+	payload := webdiff.Payload{
 		FilePath:   path,
 		HandlerID:  fc.HandlerID,
 		Mode:       "diff",
@@ -1010,7 +1010,43 @@ func diffFileWeb(repoDir string, reg *handler.Registry, path string, base, head 
 		Renderer3D: fhr.InstalledRenderer3D(fc.HandlerID),
 		Base:       fc.Base,
 		Head:       fc.Head,
-	}, openBrowser)
+	}
+	addPreviews(&payload, reg, path)
+	return webdiff.Serve(payload, openBrowser)
+}
+
+// addPreviews asks the file's handler for its previews of both sides, when it
+// declares a preview call (FHR SPEC §7) — how an OBJ is drawn in 3D: from the
+// GLB its handler computed the diff over. This is the machine's own compute,
+// with no size ceiling but the machine's. Best effort: a side that fails is
+// left out and said so, and the page still shows the change tree.
+func addPreviews(p *webdiff.Payload, reg *handler.Registry, path string) {
+	h, err := reg.Resolve(path)
+	if err != nil {
+		return
+	}
+	provider, ok := h.(handler.PreviewerProvider)
+	if !ok {
+		return
+	}
+	previewer, ok := provider.Previewer()
+	if !ok {
+		return
+	}
+	convert := func(side string, blob []byte) []byte {
+		if blob == nil {
+			return nil
+		}
+		out, err := previewer.Preview(blob)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "forge: no preview of the %s side of %s: %v\n", side, path, err)
+			return nil
+		}
+		return out
+	}
+	p.PreviewType = previewer.PreviewMediaType()
+	p.PreviewBase = convert("base", p.Base)
+	p.PreviewHead = convert("head", p.Head)
 }
 
 // ensureRenderer returns the path to the installed renderer bundle for a
