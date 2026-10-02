@@ -35,8 +35,10 @@ type SubprocessHandler struct {
 	formats    []string
 	ctx        context.Context
 
-	applyOnce sync.Once
-	canApply  bool
+	// The binary's own info, asked at most once and only when an optional call
+	// needs it: nil when it answered none.
+	infoOnce sync.Once
+	info     *Info
 }
 
 // NewSubprocessHandler builds a SubprocessHandler from a binary path and
@@ -121,18 +123,23 @@ func (h *SubprocessHandler) Merge(base, ours, theirs handler.Blob) (handler.Blob
 	return merged, ci, nil
 }
 
-// ChoiceApplier implements handler.ChoiceApplierProvider: a ConflictApplier
-// when the binary declares `capabilities.applyChoices`, asked once per handler
-// through `info`. A binary that answers nothing, or declares nothing, cannot
-// apply choices — which is the honest answer for every handler that predates
-// the call.
-func (h *SubprocessHandler) ChoiceApplier() (handler.ConflictApplier, bool) {
-	h.applyOnce.Do(func() {
-		info, err := HandlerInfo(h.ctx, h.binaryPath)
-		h.canApply = err == nil && info.Capabilities != nil &&
-			info.Capabilities.ApplyChoices != nil && *info.Capabilities.ApplyChoices
+// declared is the binary's info, asked once; nil when it answers none.
+func (h *SubprocessHandler) declared() *Info {
+	h.infoOnce.Do(func() {
+		if info, err := HandlerInfo(h.ctx, h.binaryPath); err == nil {
+			h.info = info
+		}
 	})
-	if !h.canApply {
+	return h.info
+}
+
+// ChoiceApplier implements handler.ChoiceApplierProvider: a ConflictApplier
+// when the binary declares `capabilities.applyChoices` in its info. A binary
+// that answers nothing, or declares nothing, cannot apply choices — which is
+// the honest answer for every handler that predates the call.
+func (h *SubprocessHandler) ChoiceApplier() (handler.ConflictApplier, bool) {
+	info := h.declared()
+	if info == nil || info.Capabilities == nil || info.Capabilities.ApplyChoices == nil || !*info.Capabilities.ApplyChoices {
 		return nil, false
 	}
 	return subprocessApplier{h}, true
@@ -171,6 +178,46 @@ func (a subprocessApplier) ApplyChoices(merged, theirs handler.Blob, takePaths [
 	return blob, nil
 }
 
+// Previewer implements handler.PreviewerProvider: a Previewer when the binary
+// declares a `preview` media type in its info, and nothing otherwise — the
+// call is never made on a binary that did not promise it.
+func (h *SubprocessHandler) Previewer() (handler.Previewer, bool) {
+	info := h.declared()
+	if info == nil || info.Preview == "" {
+		return nil, false
+	}
+	return subprocessPreviewer{h: h, mediaType: info.Preview}, true
+}
+
+// subprocessPreviewer makes the protocol's `preview` call.
+type subprocessPreviewer struct {
+	h         *SubprocessHandler
+	mediaType string
+}
+
+func (p subprocessPreviewer) PreviewMediaType() string { return p.mediaType }
+
+func (p subprocessPreviewer) Preview(blob handler.Blob) (handler.Blob, error) {
+	inp, _ := json.Marshal(struct {
+		Blob string `json:"blob"`
+	}{base64.StdEncoding.EncodeToString(blob)})
+	out, err := runSubprocess(p.h.ctx, p.h.binaryPath, "preview", inp)
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Blob string `json:"blob"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("parsing preview output from %s: %w", p.h.id, err)
+	}
+	b, err := base64.StdEncoding.DecodeString(result.Blob)
+	if err != nil {
+		return nil, fmt.Errorf("decoding preview from %s: %w", p.h.id, err)
+	}
+	return b, nil
+}
+
 // Info is what a handler binary answers for the protocol's "info" call: the id
 // it goes by, its own version, the extensions it claims, and the protocol
 // revision it speaks. Capabilities is the handler's own declaration — a handler
@@ -182,6 +229,9 @@ type Info struct {
 	Protocol     string            `json:"protocol"`
 	Formats      []string          `json:"formats"`
 	Capabilities *InfoCapabilities `json:"capabilities,omitempty"`
+	// Preview is the media type of the optional `preview` call (FHR SPEC §7),
+	// present only for handlers that have one.
+	Preview string `json:"preview,omitempty"`
 }
 
 // InfoCapabilities is the optional capability block of an info answer. Both

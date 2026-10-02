@@ -38,15 +38,6 @@ esac
 	return binary, logPath, stdinPath
 }
 
-func calls(t *testing.T, logPath string) []string {
-	t.Helper()
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		return nil
-	}
-	return strings.Fields(string(data))
-}
-
 func TestChoiceApplierIsOfferedWhenTheBinaryDeclaresIt(t *testing.T) {
 	bin, logPath, stdinPath := fakeHandler(t, `echo '{"id":"fake","protocol":"1.0","formats":[".fake"],"capabilities":{"semanticMerge":true,"applyChoices":true}}'`)
 	h := NewSubprocessHandler(context.Background(), bin, InstalledMeta{ID: "fake", Formats: []string{".fake"}})
