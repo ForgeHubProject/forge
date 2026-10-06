@@ -29,9 +29,9 @@ type DiffChange struct {
 
 // StructuredDiff is the wire format returned by ForgeHandler.Diff.
 type StructuredDiff struct {
-	Version  string       `json:"version"`
-	Format   string       `json:"format"`
-	Changes  []DiffChange `json:"changes"`
+	Version string       `json:"version"`
+	Format  string       `json:"format"`
+	Changes []DiffChange `json:"changes"`
 }
 
 // ConflictInfo describes semantic conflicts from a 3-way merge.
