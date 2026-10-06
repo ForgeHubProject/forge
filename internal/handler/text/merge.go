@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/sergi/go-diff/diffmatchpatch"
 	"github.com/forgehubproject/forge/internal/handler"
+	"github.com/sergi/go-diff/diffmatchpatch"
 )
 
 // hunk is a contiguous edit relative to the base line array.

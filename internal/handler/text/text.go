@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/sergi/go-diff/diffmatchpatch"
 	"github.com/forgehubproject/forge/internal/handler"
+	"github.com/sergi/go-diff/diffmatchpatch"
 )
 
 // Handler handles any plain-text file. Registered last as the catch-all fallback.

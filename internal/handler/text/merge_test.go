@@ -71,8 +71,8 @@ func TestMerge_OursAddsLine(t *testing.T) {
 // TestMerge_TheirsDeletesLine verifies a pure delete on one side applies cleanly.
 func TestMerge_TheirsDeletesLine(t *testing.T) {
 	base := handler.Blob("a\nb\nc\n")
-	ours := handler.Blob("a\nb\nc\n")  // unchanged
-	theirs := handler.Blob("a\nc\n")   // deleted b
+	ours := handler.Blob("a\nb\nc\n") // unchanged
+	theirs := handler.Blob("a\nc\n")  // deleted b
 
 	merged, ci, err := h.Merge(base, ours, theirs)
 	assertNoError(t, err)
