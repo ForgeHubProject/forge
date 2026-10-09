@@ -189,6 +189,74 @@ func (h *SubprocessHandler) Previewer() (handler.Previewer, bool) {
 	return subprocessPreviewer{h: h, mediaType: info.Preview}, true
 }
 
+func (c *InfoCapabilities) declares(p func(*InfoCapabilities) *bool) bool {
+	if c == nil {
+		return false
+	}
+	v := p(c)
+	return v != nil && *v
+}
+
+// Importer implements handler.ImporterProvider: an Importer when the binary
+// declares `capabilities.import`, and nothing otherwise — the call is never
+// made on a binary that did not promise it.
+func (h *SubprocessHandler) Importer() (handler.Importer, bool) {
+	info := h.declared()
+	if info == nil || !info.Capabilities.declares(func(c *InfoCapabilities) *bool { return c.Import }) {
+		return nil, false
+	}
+	return subprocessImporter{h}, true
+}
+
+// Exporter implements handler.ExporterProvider, on `capabilities.export`.
+func (h *SubprocessHandler) Exporter() (handler.Exporter, bool) {
+	info := h.declared()
+	if info == nil || !info.Capabilities.declares(func(c *InfoCapabilities) *bool { return c.Export }) {
+		return nil, false
+	}
+	return subprocessExporter{h}, true
+}
+
+// subprocessImporter makes the protocol's `import` call.
+type subprocessImporter struct{ h *SubprocessHandler }
+
+func (i subprocessImporter) Import(blob handler.Blob) (handler.Blob, error) {
+	inp, _ := json.Marshal(struct {
+		Blob string `json:"blob"`
+	}{base64.StdEncoding.EncodeToString(blob)})
+	return i.h.blobCall("import", inp)
+}
+
+// subprocessExporter makes the protocol's `export` call.
+type subprocessExporter struct{ h *SubprocessHandler }
+
+func (e subprocessExporter) Export(glb handler.Blob, format string) (handler.Blob, error) {
+	inp, _ := json.Marshal(struct {
+		Blob   string `json:"blob"`
+		Format string `json:"format"`
+	}{base64.StdEncoding.EncodeToString(glb), format})
+	return e.h.blobCall("export", inp)
+}
+
+// blobCall runs a call whose answer is {"blob": "<base64>"}.
+func (h *SubprocessHandler) blobCall(sub string, inp []byte) (handler.Blob, error) {
+	out, err := runSubprocess(h.ctx, h.binaryPath, sub, inp)
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Blob string `json:"blob"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("parsing %s output from %s: %w", sub, h.id, err)
+	}
+	b, err := base64.StdEncoding.DecodeString(result.Blob)
+	if err != nil {
+		return nil, fmt.Errorf("decoding %s blob from %s: %w", sub, h.id, err)
+	}
+	return b, nil
+}
+
 // subprocessPreviewer makes the protocol's `preview` call.
 type subprocessPreviewer struct {
 	h         *SubprocessHandler
@@ -242,6 +310,10 @@ type InfoCapabilities struct {
 	SemanticMerge   *bool `json:"semanticMerge,omitempty"`
 	// ApplyChoices says the binary answers `apply-choices` (FHR SPEC §7).
 	ApplyChoices *bool `json:"applyChoices,omitempty"`
+	// Import and Export say the binary answers `import` / `export` (FHR SPEC
+	// §7): the 3D family's transcoding through glTF.
+	Import *bool `json:"import,omitempty"`
+	Export *bool `json:"export,omitempty"`
 }
 
 // HandlerInfo asks an installed handler binary to describe itself. The call is
