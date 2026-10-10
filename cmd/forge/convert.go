@@ -27,6 +27,7 @@ not a converter per pair.
   forge convert bracket.obj --to glb
   forge convert scan.ply --to .stl -o parts/scan.stl
   forge convert bracket.glb --to 3mf -o -      (write to stdout)
+  forge convert bracket.obj --to stl --rev v1.0   (the file as of a revision)
 
 Handlers are the ones "forge formats install" put on this machine; a repository's
 .forge-formats list does not limit them. Conversion is lossy exactly where the
@@ -39,6 +40,7 @@ millimetres, glTF metres, and the numbers pass through unchanged.`,
 	cmd.Flags().String("to", "", "Target format, e.g. glb, .obj (required)")
 	cmd.Flags().StringP("output", "o", "", `Output file (default: the input with the new extension; "-" for stdout)`)
 	cmd.Flags().BoolP("force", "f", false, "Overwrite the output file if it exists")
+	cmd.Flags().String("rev", "", "Convert the file as of this revision (branch, tag or commit) instead of the working tree")
 	_ = cmd.MarkFlagRequired("to")
 	return cmd
 }
@@ -48,12 +50,50 @@ func runConvert(cmd *cobra.Command, args []string) error {
 	to, _ := cmd.Flags().GetString("to")
 	out, _ := cmd.Flags().GetString("output")
 	force, _ := cmd.Flags().GetBool("force")
-	return convertFile(forgerepo.AllFormatsRegistry(context.Background()), args[0], to, out, force, cmd.OutOrStdout())
+	rev, _ := cmd.Flags().GetString("rev")
+	reg := forgerepo.AllFormatsRegistry(context.Background())
+	if rev == "" {
+		return convertFile(reg, args[0], to, out, force, cmd.OutOrStdout(), func() ([]byte, error) { return os.ReadFile(args[0]) })
+	}
+	return convertFile(reg, args[0], to, defaultRevOut(args[0], to, out), force, cmd.OutOrStdout(), func() ([]byte, error) {
+		return readAtRevision(context.Background(), rev, args[0])
+	})
+}
+
+// defaultRevOut is where a converted historical file goes when -o is not given:
+// its base name with the new extension, in the current directory. The path may
+// not exist in the working tree any more, so "beside the input" is not an option.
+func defaultRevOut(src, to, out string) string {
+	if out != "" {
+		return out
+	}
+	base := filepath.Base(src)
+	return strings.TrimSuffix(base, filepath.Ext(base)) + handler.NormalizeExt(to)
+}
+
+// readAtRevision is the content of path (relative to the current directory) at
+// rev. The revision is resolved to a commit first, so a ref that moves while the
+// command runs cannot change which bytes are read, and a name that git would read
+// as an option is refused rather than passed on.
+func readAtRevision(ctx context.Context, rev, path string) ([]byte, error) {
+	if strings.HasPrefix(rev, "-") {
+		return nil, fmt.Errorf("%q is not a revision", rev)
+	}
+	dir := "."
+	commit, err := forgerepo.GitOutput(ctx, dir, "rev-parse", "--verify", "--quiet", rev+"^{commit}")
+	if err != nil {
+		return nil, fmt.Errorf("unknown revision %q", rev)
+	}
+	blob, err := forgerepo.GitOutput(ctx, dir, "show", strings.TrimSpace(string(commit))+":./"+filepath.ToSlash(path))
+	if err != nil {
+		return nil, fmt.Errorf("%s does not exist at %s: %w", path, rev, err)
+	}
+	return blob, nil
 }
 
 // convertFile reads src, converts it to the format named by to, and writes the
 // result to out ("" means beside the input, "-" means stdout).
-func convertFile(reg *handler.Registry, src, to, out string, force bool, stdout io.Writer) error {
+func convertFile(reg *handler.Registry, src, to, out string, force bool, stdout io.Writer, read func() ([]byte, error)) error {
 	to = handler.NormalizeExt(to)
 	if to == "" {
 		return fmt.Errorf("--to is required")
@@ -70,7 +110,7 @@ func convertFile(reg *handler.Registry, src, to, out string, force bool, stdout 
 		}
 	}
 
-	blob, err := os.ReadFile(src)
+	blob, err := read()
 	if err != nil {
 		return err
 	}

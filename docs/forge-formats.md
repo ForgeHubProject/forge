@@ -318,6 +318,7 @@ routes are optional. See the FHR repository `SPEC.md` for the full contract.
 forge convert bracket.obj --to glb          # → bracket.glb
 forge convert scan.ply --to .stl -o out/scan.stl
 forge convert part.3mf --to obj -o -        # to stdout
+forge convert bracket.obj --to stl --rev v1.0   # the file as of a tag, branch or commit
 ```
 
 Conversion pivots through glTF: the source format's handler answers `import`
@@ -327,6 +328,11 @@ Any pair of installed 3D formats works, because each needs one importer and one
 exporter, not a converter per pair. A handler offers the calls by declaring
 `capabilities.import` / `capabilities.export` in its `info`; forge never sends a
 call a binary did not promise.
+
+`--rev` reads the file from history (the revision is resolved to a commit first;
+the path is relative to where you run the command) and, with no `-o`, writes the
+result to the current directory under the file's base name — the path may no
+longer exist in the working tree.
 
 Handlers come from `forge formats install`; a repository's `.forge-formats`
 opt-in list does not limit what a file can be converted to. The output is never
