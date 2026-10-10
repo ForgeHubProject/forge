@@ -71,6 +71,7 @@ func rootCmd() *cobra.Command {
 		showCmd(),
 		mergeCmd(),
 		mergeFileCmd(),
+		convertCmd(),
 		mergeToolCmd(),
 		logCmd(),
 		pushCmd(),
