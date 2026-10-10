@@ -311,3 +311,27 @@ routes are optional. See the FHR repository `SPEC.md` for the full contract.
    reads `.forge-formats` and issues parallel prefetch requests for renderer
    bundles listed in `[include]`. Bundle caching strategy (CDN, versioned URL)
    is an FHR publish-protocol concern.
+
+## Converting 3D files: `forge convert`
+
+```bash
+forge convert bracket.obj --to glb          # → bracket.glb
+forge convert scan.ply --to .stl -o out/scan.stl
+forge convert part.3mf --to obj -o -        # to stdout
+```
+
+Conversion pivots through glTF: the source format's handler answers `import`
+(its file → a GLB), the target format's handler answers `export` (a GLB → its
+file), per [FHR SPEC §7](https://github.com/ForgeHubProject/FHR/blob/main/SPEC.md).
+Any pair of installed 3D formats works, because each needs one importer and one
+exporter, not a converter per pair. A handler offers the calls by declaring
+`capabilities.import` / `capabilities.export` in its `info`; forge never sends a
+call a binary did not promise.
+
+Handlers come from `forge formats install`; a repository's `.forge-formats`
+opt-in list does not limit what a file can be converted to. The output is never
+written over the input, and an existing output needs `--force`.
+
+Conversion is lossy exactly where the target format is — OBJ has no transforms
+or PBR materials, STL no names or colours — and does not rescale: STL and 3MF
+carry unitless/millimetre numbers, glTF metres, and the numbers pass through.

@@ -34,10 +34,21 @@ import (
 // rule would otherwise hand every one of those extensions to a handler — the
 // exact opposite of what writing them down said.
 func Registry(ctx context.Context, repoDir string) *handler.Registry {
+	return buildRegistry(ctx, LoadForgeFormats(repoDir), LoadIgnoredFormats(repoDir))
+}
+
+// AllFormatsRegistry is every installed handler, with no repository's opt-in
+// list narrowing it: what a command that works on a file rather than on a
+// repository (forge convert) resolves handlers through. A repository decides
+// which formats it diffs; it has no say in what a file can be converted to.
+func AllFormatsRegistry(ctx context.Context) *handler.Registry {
+	return buildRegistry(ctx, nil, nil)
+}
+
+func buildRegistry(ctx context.Context, forgeFormats, ignored map[string]bool) *handler.Registry {
 	reg := handler.NewRegistry()
 
-	forgeFormats := LoadForgeFormats(repoDir)
-	if ignored := LoadIgnoredFormats(repoDir); len(ignored) > 0 {
+	if len(ignored) > 0 {
 		reg.Register(ignoredFormats{Handler: text.New(), exts: ignored})
 	}
 

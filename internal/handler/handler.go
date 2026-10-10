@@ -109,3 +109,28 @@ type Previewer interface {
 type PreviewerProvider interface {
 	Previewer() (Previewer, bool)
 }
+
+// Importer converts one blob of a handler's own format into a binary glTF —
+// the pivot of the 3D family's transcoding (FHR SPEC §7 `import`). It is
+// faithful: the scene the handler's diff sees, nothing dressed for display.
+type Importer interface {
+	Import(blob Blob) (Blob, error)
+}
+
+// Exporter writes a binary glTF out as one of the handler's formats (FHR SPEC
+// §7 `export`). format is the target extension, which one handler may own
+// several of (.gltf and .glb). Lossy exactly where the target format is.
+type Exporter interface {
+	Export(glb Blob, format string) (Blob, error)
+}
+
+// ImporterProvider and ExporterProvider are implemented by handlers that have
+// the call only sometimes — a subprocess handler whose binary may or may not
+// declare it. Asked when needed, not at load.
+type ImporterProvider interface {
+	Importer() (Importer, bool)
+}
+
+type ExporterProvider interface {
+	Exporter() (Exporter, bool)
+}
